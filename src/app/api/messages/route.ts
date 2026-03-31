@@ -30,8 +30,9 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      messages,
-      pagination: {
+      data: messages,
+      error: null,
+      meta: {
         total,
         limit,
         offset,
@@ -80,7 +81,7 @@ export async function POST(request: NextRequest) {
       },
     })
 
-    return NextResponse.json({ success: true, message }, { status: 201 })
+    return NextResponse.json({ success: true, data: message, error: null }, { status: 201 })
   } catch (error: any) {
     console.error('Error creating message:', error)
     return NextResponse.json(

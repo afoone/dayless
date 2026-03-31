@@ -23,6 +23,8 @@ import {
   Bot,
   LayoutDashboard,
   MessageSquare,
+  KanbanSquare,
+  Ticket,
   Users,
   FolderKanban,
   Brain,
@@ -31,15 +33,15 @@ import {
   Settings,
   PanelLeftClose,
   PanelLeft,
-  ChevronDown,
   Menu,
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { useState } from 'react'
 
 const navItems: { id: AppView; label: string; icon: React.ElementType; badge?: string }[] = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'chat', label: 'Chat', icon: MessageSquare, badge: '3' },
+  { id: 'tickets', label: 'Tickets', icon: Ticket },
+  { id: 'kanban', label: 'Kanban', icon: KanbanSquare },
   { id: 'teams', label: 'Teams', icon: Users },
   { id: 'projects', label: 'Projects', icon: FolderKanban },
   { id: 'knowledge', label: 'Knowledge Base', icon: Brain },
@@ -49,9 +51,8 @@ const navItems: { id: AppView; label: string; icon: React.ElementType; badge?: s
 ]
 
 function NavContent({ collapsed, onNavigate }: { collapsed: boolean; onNavigate?: () => void }) {
-  const { currentView, setCurrentView, selectedTeamId, teams, selectTeam, currentMember } = useAppStore()
-  const [teamDropdownOpen, setTeamDropdownOpen] = useState(false)
-  const selectedTeam = teams.find(t => t.id === selectedTeamId)
+  const { currentView, setCurrentView, teams, currentMember } = useAppStore()
+  const memberTeam = teams.find((t) => t.id === currentMember?.teamId)
 
   return (
     <div className="flex h-full flex-col">
@@ -135,51 +136,19 @@ function NavContent({ collapsed, onNavigate }: { collapsed: boolean; onNavigate?
         </nav>
       </ScrollArea>
 
-      {/* Team Selector */}
+      {/* Team */}
       <div className="border-t border-slate-700/50 p-3">
         <AnimatePresence>
           {!collapsed ? (
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-              <button
-                onClick={() => setTeamDropdownOpen(!teamDropdownOpen)}
-                className="flex w-full items-center justify-between rounded-lg bg-slate-800/50 px-3 py-2.5 text-left hover:bg-slate-800 transition-colors"
-              >
+              <div className="flex w-full items-center justify-between rounded-lg bg-slate-800/50 px-3 py-2.5 text-left">
                 <div className="flex items-center gap-2 min-w-0">
                   <div className="size-2 rounded-full bg-emerald-400 shrink-0" />
                   <span className="text-sm font-medium text-slate-300 truncate">
-                    {selectedTeam?.name || 'Select Team'}
+                    {memberTeam?.name || 'Sin equipo'}
                   </span>
                 </div>
-                <ChevronDown className={cn('size-4 text-slate-500 shrink-0 transition-transform', teamDropdownOpen && 'rotate-180')} />
-              </button>
-              <AnimatePresence>
-                {teamDropdownOpen && (
-                  <motion.div
-                    initial={{ opacity: 0, y: -5, height: 0 }}
-                    animate={{ opacity: 1, y: 0, height: 'auto' }}
-                    exit={{ opacity: 0, y: -5, height: 0 }}
-                    className="mt-1 overflow-hidden"
-                  >
-                    <div className="rounded-lg bg-slate-800/80 border border-slate-700/50 py-1">
-                      {teams.length > 0 ? teams.map(team => (
-                        <button
-                          key={team.id}
-                          onClick={() => { selectTeam(team.id); setTeamDropdownOpen(false) }}
-                          className={cn(
-                            'flex w-full items-center gap-2 px-3 py-2 text-sm hover:bg-slate-700/50 transition-colors',
-                            selectedTeamId === team.id ? 'text-emerald-400' : 'text-slate-400'
-                          )}
-                        >
-                          <div className="size-2 rounded-full shrink-0" style={{ backgroundColor: team.color }} />
-                          <span className="truncate">{team.name}</span>
-                        </button>
-                      )) : (
-                        <div className="px-3 py-2 text-sm text-slate-500">No teams yet</div>
-                      )}
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
+              </div>
             </motion.div>
           ) : (
             <TooltipProvider delayDuration={0}>
@@ -190,7 +159,7 @@ function NavContent({ collapsed, onNavigate }: { collapsed: boolean; onNavigate?
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent side="right" className="bg-slate-800 text-white border-slate-700">
-                  {selectedTeam?.name || 'No team selected'}
+                  {memberTeam?.name || 'Sin equipo'}
                 </TooltipContent>
               </Tooltip>
             </TooltipProvider>

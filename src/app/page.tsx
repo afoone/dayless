@@ -9,6 +9,9 @@ import { AppHeader } from '@/components/layout/header'
 import { AnimatePresence, motion } from 'framer-motion'
 import DashboardView from '@/components/views/dashboard-view'
 import ChatView from '@/components/views/chat-view'
+import TicketsView from '@/components/views/tickets-view'
+import KanbanView from '@/components/views/kanban-view'
+import ProfileView from '@/components/views/profile-view'
 import TeamsView from '@/components/views/teams-view'
 import ProjectsView from '@/components/views/projects-view'
 import KnowledgeView from '@/components/views/knowledge-view'
@@ -21,6 +24,9 @@ import type { AppView, Team, TeamMember } from '@/types'
 const viewComponents: Record<AppView, React.ComponentType> = {
   dashboard: DashboardView,
   chat: ChatView,
+  tickets: TicketsView,
+  kanban: KanbanView,
+  profile: ProfileView,
   teams: TeamsView,
   projects: ProjectsView,
   knowledge: KnowledgeView,
@@ -31,7 +37,7 @@ const viewComponents: Record<AppView, React.ComponentType> = {
 
 function AppShell() {
   const { data: session } = useSession()
-  const { currentView, setTeams, selectTeam, setCurrentMember, selectedTeamId } = useAppStore()
+  const { currentView, setTeams, setCurrentMember } = useAppStore()
   const ViewComponent = viewComponents[currentView]
 
   // Load teams
@@ -41,53 +47,58 @@ function AppShell() {
       if (teamsResult.success && Array.isArray(teamsResult.data)) {
         const teamsList = teamsResult.data as unknown as Team[]
         setTeams(teamsList)
-        if (teamsList.length > 0 && !selectedTeamId) {
-          selectTeam(teamsList[0].id)
-        }
       }
     } catch (error) {
       console.error('Failed to load teams:', error)
     }
-  }, [setTeams, selectTeam, selectedTeamId])
+  }, [setTeams])
 
-  // Find and set the current member identity
+  // Find and set the current member identity from authenticated user
   const resolveMember = useCallback(async () => {
     if (!session?.user?.email) return
 
     try {
-      const teamId = selectedTeamId || useAppStore.getState().selectedTeamId
-      const params = teamId ? `?teamId=${teamId}` : ''
-      const membersResult = await getMembers(teamId || undefined)
+      const membersResult = await getMembers()
 
       if (membersResult.success && Array.isArray(membersResult.data)) {
         const membersList = membersResult.data as unknown as TeamMember[]
-        const matching = membersList.find(
+        const uid = session.user.id
+        const byUserId = membersList.filter((m) => m.userId && m.userId === uid)
+        if (byUserId.length === 1) {
+          setCurrentMember(byUserId[0])
+          return
+        }
+        if (byUserId.length > 1) {
+          byUserId.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+          setCurrentMember(byUserId[0])
+          return
+        }
+        const sameEmail = membersList.filter(
           (m) => m.email?.toLowerCase() === session.user.email?.toLowerCase()
         )
+        const matching = sameEmail[0]
         if (matching) {
           setCurrentMember(matching)
           return
         }
       }
 
-      // Fallback: set identity from session
-      if (!useAppStore.getState().currentMember) {
-        setCurrentMember({
-          id: session.user.id,
-          teamId: selectedTeamId || '',
-          name: session.user.name || 'User',
-          role: 'Developer',
-          email: session.user.email,
-          avatar: session.user.image,
-          status: 'active',
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        })
-      }
+      // No TeamMember row yet: expose User id so /api/members/[id]/projects can resolve via userId
+      setCurrentMember({
+        id: session.user.id,
+        teamId: '',
+        name: session.user.name || 'User',
+        role: 'Developer',
+        email: session.user.email ?? null,
+        avatar: session.user.image ?? null,
+        status: 'active',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      })
     } catch (error) {
       console.error('Failed to resolve member:', error)
     }
-  }, [session, selectedTeamId, setCurrentMember])
+  }, [session, setCurrentMember])
 
   // Load teams once on mount
   useEffect(() => {

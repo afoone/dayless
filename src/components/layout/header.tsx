@@ -14,10 +14,14 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Bell, Search, Moon, Sun, User, LogOut, Settings } from 'lucide-react'
 import { useTheme } from 'next-themes'
+import { signOut } from 'next-auth/react'
 
 const viewLabels: Record<string, string> = {
   dashboard: 'Dashboard',
   chat: 'Chat',
+  tickets: 'Tickets',
+  kanban: 'Kanban',
+  profile: 'Profile',
   teams: 'Teams',
   projects: 'Projects',
   knowledge: 'Knowledge Base',
@@ -32,7 +36,7 @@ export function AppHeader() {
 
   const handleLogout = async () => {
     sessionStorage.removeItem('dayless-user')
-    window.location.href = '/'
+    await signOut({ callbackUrl: '/' })
   }
 
   return (
@@ -90,7 +94,7 @@ export function AppHeader() {
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-48">
-            <DropdownMenuItem>
+            <DropdownMenuItem onClick={() => useAppStore.getState().setCurrentView('profile')}>
               <User className="size-4 mr-2" /> Profile
             </DropdownMenuItem>
             <DropdownMenuItem onClick={() => useAppStore.getState().setCurrentView('settings')}>

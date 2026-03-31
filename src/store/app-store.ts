@@ -13,8 +13,6 @@ interface AppState {
   // --- Current User ---
   currentMember: TeamMember | null;
 
-  // --- Team Context ---
-  selectedTeamId: string | null;
   teams: Team[];
 
   // --- Actions: Navigation ---
@@ -25,8 +23,6 @@ interface AppState {
   // --- Actions: Current User ---
   setCurrentMember: (member: TeamMember | null) => void;
 
-  // --- Actions: Team Context ---
-  selectTeam: (teamId: string | null) => void;
   setTeams: (teams: Team[]) => void;
 }
 
@@ -35,7 +31,6 @@ export const useAppStore = create<AppState>((set) => ({
   currentView: "dashboard",
   sidebarCollapsed: false,
   currentMember: null,
-  selectedTeamId: null,
   teams: [],
 
   // --- Navigation Actions ---
@@ -49,9 +44,6 @@ export const useAppStore = create<AppState>((set) => ({
 
   // --- Current User Actions ---
   setCurrentMember: (member) => set({ currentMember: member }),
-
-  // --- Team Context Actions ---
-  selectTeam: (teamId) => set({ selectedTeamId: teamId }),
 
   setTeams: (teams) => set({ teams }),
 }));

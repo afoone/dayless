@@ -5,6 +5,10 @@ import bcrypt from 'bcryptjs'
 export async function POST() {
   try {
     // Clean existing data (order matters for FK constraints)
+    await db.$executeRawUnsafe('DELETE FROM "TicketTransition"')
+    await db.$executeRawUnsafe('DELETE FROM "TicketMessage"')
+    await db.$executeRawUnsafe('DELETE FROM "Ticket"')
+    await db.$executeRawUnsafe('DELETE FROM "TicketWorkflow"')
     await db.standupCheckin.deleteMany()
     await db.message.deleteMany()
     await db.knowledgeEntry.deleteMany()
@@ -13,6 +17,7 @@ export async function POST() {
     await db.project.deleteMany()
     await db.teamMember.deleteMany()
     await db.team.deleteMany()
+    await db.user.deleteMany()
 
     // Create users via raw SQL to avoid stale Prisma client cache
     const hashedPassword = await bcrypt.hash('demo1234', 12)
@@ -40,6 +45,9 @@ export async function POST() {
     const devopsTeam = await db.team.create({
       data: { name: 'DevOps Team', description: 'CI/CD, monitoring, and cloud infrastructure', color: '#f59e0b' },
     })
+    const qaTeam = await db.team.create({
+      data: { name: 'QA Team', description: 'Quality assurance, test automation, and release validation', color: '#ec4899' },
+    })
 
     // Create members (some linked to users via raw SQL for userId)
     const memberData = [
@@ -55,6 +63,8 @@ export async function POST() {
       { teamId: devopsTeam.id, name: 'Raúl Martínez', role: 'SRE Lead', email: 'raul@team.com', status: 'active' },
       { teamId: devopsTeam.id, name: 'Karen Wu', role: 'Cloud Engineer', email: 'karen@team.com', status: 'active' },
       { teamId: devopsTeam.id, name: 'Víctor Torres', role: 'Platform Dev', email: 'victor@team.com', status: 'offline' },
+      { teamId: qaTeam.id, name: 'Lucía Pérez', role: 'QA Lead', email: 'lucia.qa@dayless.ai', status: 'active' },
+      { teamId: qaTeam.id, name: 'Miguel Ortega', role: 'QA Engineer', email: 'miguel.qa@dayless.ai', status: 'active' },
     ]
 
     // Create members - first without userId, then update with raw SQL
@@ -72,13 +82,144 @@ export async function POST() {
     await db.$executeRaw`UPDATE "TeamMember" SET "userId" = ${users[2].id} WHERE email = ${users[2].email}`
 
     // Create projects
-    await Promise.all([
+    const projects = await Promise.all([
       db.project.create({ data: { teamId: frontendTeam.id, name: 'Payment Module Refactor', description: 'Refactor payment processing with Stripe integration', status: 'active', jiraProjectKey: 'PAY', githubRepo: 'org/payment-module' } }),
       db.project.create({ data: { teamId: backendTeam.id, name: 'Auth Service v2', description: 'New authentication service with OAuth2 and MFA', status: 'active', jiraProjectKey: 'AUTH', githubRepo: 'org/auth-service' } }),
       db.project.create({ data: { teamId: devopsTeam.id, name: 'CI/CD Pipeline', description: 'Automated deployment pipeline with staging and production', status: 'active', jiraProjectKey: 'DEVOPS' } }),
+      db.project.create({ data: { teamId: qaTeam.id, name: 'Release Quality Gate', description: 'Cross-team release validation and regression quality gates', status: 'active', jiraProjectKey: 'QA' } }),
       db.project.create({ data: { teamId: frontendTeam.id, name: 'Mobile App MVP', description: 'React Native mobile application for iOS and Android', status: 'paused', jiraProjectKey: 'MOB' } }),
       db.project.create({ data: { teamId: backendTeam.id, name: 'Analytics Dashboard', description: 'Real-time analytics and reporting dashboard', status: 'completed', jiraProjectKey: 'ANALYTICS' } }),
     ])
+
+    // Assign members to projects and set default project
+    const frontendProjects = projects.filter((p) => p.teamId === frontendTeam.id)
+    const backendProjects = projects.filter((p) => p.teamId === backendTeam.id)
+    const devopsProjects = projects.filter((p) => p.teamId === devopsTeam.id)
+    const qaProjects = projects.filter((p) => p.teamId === qaTeam.id)
+
+    const frontendMembers = members.filter((m) => m.teamId === frontendTeam.id)
+    const backendMembers = members.filter((m) => m.teamId === backendTeam.id)
+    const devopsMembers = members.filter((m) => m.teamId === devopsTeam.id)
+    const qaMembers = members.filter((m) => m.teamId === qaTeam.id)
+
+    const assignMembersToProjects = async (teamMembers: any[], teamProjects: any[]) => {
+      for (const member of teamMembers) {
+        // default project is first active project in team
+        const defaultProject = teamProjects.find((p) => p.status === 'active') || teamProjects[0] || null
+        if (defaultProject) {
+          await db.$executeRawUnsafe(
+            'UPDATE "TeamMember" SET "defaultProjectId" = ? WHERE id = ?',
+            defaultProject.id,
+            member.id
+          )
+        }
+        for (const project of teamProjects) {
+          await db.$executeRawUnsafe(
+            'INSERT INTO "ProjectAssignment" (id, "projectId", "memberId", "createdAt") VALUES (?, ?, ?, ?)',
+            'pas_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
+            project.id,
+            member.id,
+            now
+          )
+        }
+      }
+    }
+
+    await assignMembersToProjects(frontendMembers, frontendProjects)
+    await assignMembersToProjects(backendMembers, backendProjects)
+    await assignMembersToProjects(devopsMembers, devopsProjects)
+    await assignMembersToProjects(qaMembers, qaProjects)
+
+    // Seed internal workflows and tickets for first two projects
+    const [paymentProject, authProject] = projects
+    const workflowTemplate = [
+      { name: 'Nuevo', position: 0, color: '#64748b', isQa: 0, isDone: 0 },
+      { name: 'En curso', position: 1, color: '#10b981', isQa: 0, isDone: 0 },
+      { name: 'Mitad', position: 2, color: '#f59e0b', isQa: 0, isDone: 0 },
+      { name: 'QA', position: 3, color: '#8b5cf6', isQa: 1, isDone: 0 },
+      { name: 'Hecho', position: 4, color: '#16a34a', isQa: 0, isDone: 1 },
+      { name: 'Rechazado', position: 5, color: '#ef4444', isQa: 0, isDone: 1 },
+    ]
+
+    const createWorkflow = async (projectId: string) => {
+      for (const s of workflowTemplate) {
+        await db.$executeRawUnsafe(
+          'INSERT INTO "TicketWorkflow" (id, "projectId", name, position, color, "isDone", "isQa", "createdAt", "updatedAt") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          'twf_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
+          projectId,
+          s.name,
+          s.position,
+          s.color,
+          s.isDone,
+          s.isQa,
+          now,
+          now
+        )
+      }
+      return db.$queryRawUnsafe(
+        'SELECT id, name FROM "TicketWorkflow" WHERE "projectId" = ? ORDER BY position ASC',
+        projectId
+      ) as Promise<Array<{ id: string; name: string }>>
+    }
+
+    const paymentStates = await createWorkflow(paymentProject.id)
+    const authStates = await createWorkflow(authProject.id)
+
+    const paymentTickets = [
+      { title: 'Corregir verificación de firma en webhook Stripe', status: 'En curso', priority: 'high', estimate: '2d', progress: '60%' },
+      { title: 'Refactor del servicio de pagos legacy', status: 'Mitad', priority: 'medium', estimate: '4d', progress: '50%' },
+      { title: 'Agregar tests e2e para checkout', status: 'Nuevo', priority: 'medium', estimate: '3d', progress: null },
+    ]
+    const authTickets = [
+      { title: 'Implementar refresh token seguro', status: 'En curso', priority: 'high', estimate: '3d', progress: '40%' },
+      { title: 'Documentar flujo OAuth2 para QA', status: 'QA', priority: 'low', estimate: '1d', progress: '95%' },
+      { title: 'Revisar errores de login social en staging', status: 'Nuevo', priority: 'high', estimate: '2d', progress: null },
+    ]
+
+    const createTicketSet = async (project: any, states: Array<{ id: string; name: string }>, items: any[]) => {
+      const qaTeamRows = await db.$queryRawUnsafe(
+        'SELECT id FROM "Team" WHERE lower(name) LIKE lower(?) LIMIT 1',
+        '%qa%'
+      ) as Array<{ id: string }>
+      const qaTeamId = qaTeamRows[0]?.id || null
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i]
+        const status = states.find((s) => s.name === item.status) || states[0]
+        const ticketId = 'tkt_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8)
+        const targetTeamId = /(qa|test|testing|validaci[oó]n|regresi[oó]n)/i.test(`${item.title}`) ? qaTeamId : null
+        await db.$executeRawUnsafe(
+          'INSERT INTO "Ticket" (id, "teamId", "targetTeamId", "projectId", "statusId", title, description, priority, estimate, progress, "order", "createdByType", "createdByName", "createdAt", "updatedAt") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          ticketId,
+          project.teamId,
+          targetTeamId,
+          project.id,
+          status.id,
+          item.title,
+          `Ticket seed: ${item.title}`,
+          item.priority,
+          item.estimate,
+          item.progress,
+          i + 1,
+          'system',
+          'Seed',
+          now,
+          now
+        )
+        await db.$executeRawUnsafe(
+          'INSERT INTO "TicketTransition" (id, "ticketId", "toStatusId", reason, "actorType", "actorName", "createdAt") VALUES (?, ?, ?, ?, ?, ?, ?)',
+          'ttr_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
+          ticketId,
+          status.id,
+          'Seed inicial',
+          'system',
+          'Seed',
+          now
+        )
+      }
+    }
+
+    await createTicketSet(paymentProject, paymentStates, paymentTickets)
+    await createTicketSet(authProject, authStates, authTickets)
 
     // Create knowledge entries
     await Promise.all([
@@ -89,6 +230,7 @@ export async function POST() {
       db.knowledgeEntry.create({ data: { teamId: backendTeam.id, key: 'Database Migration Strategy', value: 'Decided to use Prisma Migrate for all schema changes. No raw SQL migrations allowed. Review in PR required.', category: 'decision', source: 'Team Decision', confidence: 100, isVerified: true } }),
       db.knowledgeEntry.create({ data: { teamId: frontendTeam.id, key: 'Code Review Policy', value: 'All PRs require at least 2 approvals before merging. One must be from a Tech Lead.', category: 'process', source: 'Dayless.ai', confidence: 95, isVerified: true } }),
       db.knowledgeEntry.create({ data: { teamId: devopsTeam.id, key: 'Deployment Schedule', value: 'Deployments to production happen on Tuesdays and Thursdays at 10:00 AM CET. Emergency deploys require CTO approval.', category: 'general', source: 'DevOps Team', confidence: 90, isVerified: true } }),
+      db.knowledgeEntry.create({ data: { teamId: qaTeam.id, key: 'QA Release Gate', value: 'Para liberar una versión, QA debe validar regresión crítica, smoke de producción y checklist de release.', category: 'process', source: 'QA Team', confidence: 95, isVerified: true } }),
       db.knowledgeEntry.create({ data: { teamId: frontendTeam.id, key: 'Frontend Testing', value: 'Use Vitest for unit tests and Playwright for E2E. Minimum 80% coverage for new code.', category: 'technical', source: 'Frontend Team Lead', confidence: 85, isVerified: true } }),
     ])
 
@@ -113,13 +255,19 @@ export async function POST() {
     return NextResponse.json({
       success: true,
       data: {
-        teams: 3,
-        members: 12,
-        projects: 5,
-        knowledge: 8,
+        teams: 4,
+        members: 14,
+        projects: 6,
+        knowledge: 9,
         messages: 5,
         standups: 3,
         users: 3,
+        tickets: 6,
+        assignments:
+          frontendMembers.length * frontendProjects.length +
+          backendMembers.length * backendProjects.length +
+          devopsMembers.length * devopsProjects.length +
+          qaMembers.length * qaProjects.length,
       },
     })
   } catch (error) {

@@ -3,6 +3,10 @@ import type {
   Team,
   TeamMember,
   Project,
+  Ticket,
+  TicketWorkflow,
+  TicketMessage,
+  TicketTransition,
   Message,
   KnowledgeEntry,
   DailyReport,
@@ -13,6 +17,8 @@ import type {
   UpdateMemberInput,
   CreateProjectInput,
   UpdateProjectInput,
+  CreateTicketInput,
+  UpdateTicketInput,
   CreateKnowledgeInput,
   UpdateKnowledgeInput,
   SubmitStandupInput,
@@ -56,6 +62,30 @@ export const getMembers = (teamId?: string) => {
 export const createMember = (input: CreateMemberInput) => apiFetch<TeamMember>("members", { method: "POST", body: JSON.stringify(input) });
 export const updateMember = (input: UpdateMemberInput) => apiFetch<TeamMember>(`members/${encodeURIComponent(input.id)}`, { method: "PUT", body: JSON.stringify(input) });
 export const deleteMember = (id: string) => apiFetch<null>(`members/${encodeURIComponent(id)}`, { method: "DELETE" });
+export const getMemberProjects = (memberOrUserId: string) =>
+  apiFetch<{
+    member: { id: string; name: string; role: string; email: string | null; teamId: string; defaultProjectId: string | null };
+    defaultProject: {
+      id: string;
+      name: string;
+      description: string | null;
+      status: string;
+      teamId: string;
+      githubRepo: string | null;
+      jiraProjectKey: string | null;
+      teamName: string;
+    } | null;
+    projects: Array<{
+      id: string;
+      name: string;
+      description: string | null;
+      status: string;
+      teamId: string;
+      githubRepo: string | null;
+      jiraProjectKey: string | null;
+      teamName: string;
+    }>;
+  }>(`members/${encodeURIComponent(memberOrUserId)}/projects`);
 
 // --- Projects ---
 export const getProjects = (teamId?: string) => {
@@ -65,6 +95,65 @@ export const getProjects = (teamId?: string) => {
 export const createProject = (input: CreateProjectInput) => apiFetch<Project>("projects", { method: "POST", body: JSON.stringify(input) });
 export const updateProject = (input: UpdateProjectInput) => apiFetch<Project>(`projects/${encodeURIComponent(input.id)}`, { method: "PUT", body: JSON.stringify(input) });
 export const deleteProject = (id: string) => apiFetch<null>(`projects/${encodeURIComponent(id)}`, { method: "DELETE" });
+
+// --- Ticket Workflows ---
+export const getProjectWorkflows = (projectId: string) =>
+  apiFetch<TicketWorkflow[]>(`ticket-workflows?projectId=${encodeURIComponent(projectId)}`);
+export const saveProjectWorkflows = (projectId: string, workflows: Partial<TicketWorkflow>[]) =>
+  apiFetch<TicketWorkflow[]>("ticket-workflows", {
+    method: "POST",
+    body: JSON.stringify({ projectId, workflows }),
+  });
+
+// --- Tickets ---
+export const getTickets = (filters?: { teamId?: string; projectId?: string; targetTeamId?: string }) => {
+  const params = new URLSearchParams();
+  if (filters?.teamId) params.set("teamId", filters.teamId);
+  if (filters?.projectId) params.set("projectId", filters.projectId);
+  if (filters?.targetTeamId) params.set("targetTeamId", filters.targetTeamId);
+  const qs = params.toString();
+  return apiFetch<Ticket[]>(`tickets${qs ? `?${qs}` : ""}`);
+};
+export const getTicket = (id: string) => apiFetch<Ticket & { transitions?: TicketTransition[] }>(`tickets/${encodeURIComponent(id)}`);
+export const createTicket = (input: CreateTicketInput) =>
+  apiFetch<Ticket>("tickets", { method: "POST", body: JSON.stringify(input) });
+export const updateTicket = (input: UpdateTicketInput) =>
+  apiFetch<Ticket>(`tickets/${encodeURIComponent(input.id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+export const deleteTicket = (id: string) => apiFetch<null>(`tickets/${encodeURIComponent(id)}`, { method: "DELETE" });
+export const moveTicket = (id: string, statusId: string, order: number, reason?: string) =>
+  apiFetch<Ticket>(`tickets/${encodeURIComponent(id)}/move`, {
+    method: "PATCH",
+    body: JSON.stringify({ statusId, order, reason }),
+  });
+
+// --- Ticket Messages ---
+export const getTicketMessages = (ticketId: string, limit = 100) =>
+  apiFetch<TicketMessage[]>(`tickets/${encodeURIComponent(ticketId)}/messages?limit=${limit}`);
+export const sendTicketMessage = (
+  ticketId: string,
+  payload: { senderId?: string | null; senderName: string; senderType?: "member" | "ai" | "system"; content: string; metadata?: unknown }
+) =>
+  apiFetch<TicketMessage>(`tickets/${encodeURIComponent(ticketId)}/messages`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+export const runTicketAiAction = (ticketId: string, action: string, context?: unknown) =>
+  apiFetch<any>(`tickets/${encodeURIComponent(ticketId)}/ai`, {
+    method: "POST",
+    body: JSON.stringify({ action, context }),
+  });
+export const getTicketExternalLinks = (ticketId: string) =>
+  apiFetch<{ github: Array<{ repo: string; number: number; url?: string }>; jira: Array<{ key: string; url?: string }> }>(
+    `tickets/${encodeURIComponent(ticketId)}/external-links`
+  );
+export const updateTicketExternalLinks = (ticketId: string, externalRefs: unknown) =>
+  apiFetch<any>(`tickets/${encodeURIComponent(ticketId)}/external-links`, {
+    method: "PATCH",
+    body: JSON.stringify({ externalRefs }),
+  });
 
 // --- Messages ---
 export const getMessages = (teamId: string, limit = 50) => apiFetch<Message[] & { meta?: { total: number } }>(`messages?teamId=${encodeURIComponent(teamId)}&limit=${limit}`);

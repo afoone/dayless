@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useAppStore } from '@/store/app-store'
-import { getProjects, getGitHubIssues, createGitHubIssue, getJiraIssues, createJiraIssue, type GitHubIssue, type JiraIssue } from '@/lib/api'
+import { getProjects, getGitHubIssues, createGitHubIssue, getJiraIssues, createJiraIssue, getMemberProjects, type GitHubIssue, type JiraIssue } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
@@ -34,6 +34,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { toast } from 'sonner'
 import type { Project } from '@/types'
+import { assignedProjectIdsFromMemberContext } from '@/lib/member-projects'
 
 const containerVariants = { hidden: { opacity: 0 }, visible: { opacity: 1, transition: { staggerChildren: 0.08 } } }
 const itemVariants = { hidden: { opacity: 0, y: 20 }, visible: { opacity: 1, y: 0, transition: { duration: 0.4 } } }
@@ -54,7 +55,7 @@ const labelColors: Record<string, string> = {
 }
 
 export default function ProjectsView() {
-  const { selectedTeamId } = useAppStore()
+  const { currentMember } = useAppStore()
   const [projects, setProjects] = useState<Project[]>([])
   const [loading, setLoading] = useState(true)
   const [expandedProject, setExpandedProject] = useState<string | null>(null)
@@ -69,15 +70,20 @@ export default function ProjectsView() {
   const [creatingIssue, setCreatingIssue] = useState(false)
 
   useEffect(() => {
-    if (selectedTeamId) {
-      setLoading(true)
-      getProjects(selectedTeamId).then(res => {
-        if (res.success && Array.isArray(res.data)) {
-          setProjects(res.data as unknown as Project[])
+    if (!currentMember?.id) return
+    setLoading(true)
+    Promise.all([getMemberProjects(currentMember.id), getProjects()])
+      .then(([memberProjectsRes, allProjectsRes]) => {
+        if (!memberProjectsRes.success || !memberProjectsRes.data || !allProjectsRes.success || !Array.isArray(allProjectsRes.data)) {
+          setProjects([])
+          return
         }
-      }).finally(() => setLoading(false))
-    }
-  }, [selectedTeamId])
+        const assignedIds = new Set(assignedProjectIdsFromMemberContext(memberProjectsRes.data))
+        const assigned = (allProjectsRes.data as unknown as Project[]).filter((p) => assignedIds.has(p.id))
+        setProjects(assigned)
+      })
+      .finally(() => setLoading(false))
+  }, [currentMember?.id])
 
   const loadIssues = async (project: Project) => {
     if (project.githubRepo && project.githubToken) {
@@ -138,12 +144,12 @@ export default function ProjectsView() {
     }
   }
 
-  const filteredProjects = filter === 'all' ? projects : projects.filter(p => p.status === filter)
-
   const formatDate = (dateStr: string) => {
     const d = new Date(dateStr)
     return d.toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })
   }
+
+  const filteredProjects = filter === 'all' ? projects : projects.filter((p) => p.status === filter)
 
   return (
     <motion.div className="space-y-6 p-4 md:p-6 lg:p-8" variants={containerVariants} initial="hidden" animate="visible">
@@ -151,9 +157,9 @@ export default function ProjectsView() {
       <motion.div variants={itemVariants} className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Projects</h1>
-          <p className="text-sm text-slate-500 mt-1">Track projects, GitHub Issues, and integrations</p>
+          <p className="text-sm text-slate-500 mt-1">Los mismos proyectos que en Perfil; aquí puedes filtrar solo por estado.</p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-col items-end gap-1">
           <Select value={filter} onValueChange={setFilter}>
             <SelectTrigger className="w-[140px]">
               <SelectValue placeholder="Filter" />
@@ -165,6 +171,11 @@ export default function ProjectsView() {
               <SelectItem value="completed">Completed</SelectItem>
             </SelectContent>
           </Select>
+          {filter !== 'all' && (
+            <p className="text-[11px] text-slate-400 max-w-[220px] text-right">
+              Perfil lista todos los estados; con &quot;{filter}&quot; aquí verás menos filas.
+            </p>
+          )}
         </div>
       </motion.div>
 
@@ -184,7 +195,9 @@ export default function ProjectsView() {
           <Card className="border-slate-200/80 bg-white">
             <CardContent className="p-8 text-center">
               <FolderKanban className="size-10 text-slate-200 mx-auto mb-3" />
-              <p className="text-sm text-slate-500">No projects found for this team.</p>
+              <p className="text-sm text-slate-500">
+                {projects.length === 0 ? 'No tienes proyectos asignados.' : 'Ningún proyecto con este filtro de estado.'}
+              </p>
             </CardContent>
           </Card>
         ) : (

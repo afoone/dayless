@@ -8,6 +8,9 @@
 export type AppView =
   | "dashboard"
   | "chat"
+  | "tickets"
+  | "kanban"
+  | "profile"
   | "teams"
   | "projects"
   | "knowledge"
@@ -44,6 +47,8 @@ export interface Team {
 export interface TeamMember {
   id: string;
   teamId: string;
+  userId?: string | null;
+  defaultProjectId?: string | null;
   name: string;
   role: string;
   email: string | null;
@@ -69,6 +74,72 @@ export interface Project {
   createdAt: string;
   updatedAt: string;
   team?: Team;
+  workflows?: TicketWorkflow[];
+  tickets?: Ticket[];
+}
+
+export interface TicketWorkflow {
+  id: string;
+  projectId: string;
+  name: string;
+  position: number;
+  color: string;
+  isDone: boolean;
+  isQa: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Ticket {
+  id: string;
+  teamId: string;
+  targetTeamId: string | null;
+  projectId: string;
+  statusId: string;
+  title: string;
+  description: string | null;
+  priority: string;
+  estimate: string | null;
+  progress: string | null;
+  order: number;
+  externalRefs: string | null;
+  metadata: string | null;
+  assigneeMemberId: string | null;
+  reporterMemberId: string | null;
+  /** member | ai | system */
+  createdByType: string;
+  createdByName: string | null;
+  createdAt: string;
+  updatedAt: string;
+  status?: TicketWorkflow;
+  targetTeam?: Team | null;
+  assignee?: TeamMember | null;
+  reporter?: TeamMember | null;
+  project?: { id: string; name: string };
+}
+
+export interface TicketMessage {
+  id: string;
+  ticketId: string;
+  senderId: string | null;
+  senderName: string;
+  senderType: "member" | "ai" | "system";
+  content: string;
+  metadata: string | null;
+  createdAt: string;
+}
+
+export interface TicketTransition {
+  id: string;
+  ticketId: string;
+  fromStatusId: string | null;
+  toStatusId: string;
+  reason: string | null;
+  actorType: string;
+  actorName: string | null;
+  createdAt: string;
+  fromStatus?: TicketWorkflow | null;
+  toStatus?: TicketWorkflow;
 }
 
 export interface Message {
@@ -192,6 +263,43 @@ export interface UpdateProjectInput {
   jiraToken?: string;
   githubRepo?: string;
   githubToken?: string;
+}
+
+export interface CreateTicketInput {
+  teamId: string;
+  targetTeamId?: string;
+  projectId: string;
+  title: string;
+  description?: string;
+  statusId?: string;
+  priority?: string;
+  estimate?: string;
+  progress?: string;
+  assigneeMemberId?: string;
+  reporterMemberId?: string;
+  createdByType?: "member" | "ai" | "system";
+  createdByName?: string | null;
+  externalRefs?: unknown;
+  metadata?: unknown;
+}
+
+export interface UpdateTicketInput {
+  id: string;
+  title?: string;
+  description?: string;
+  statusId?: string;
+  priority?: string;
+  estimate?: string;
+  progress?: string;
+  order?: number;
+  targetTeamId?: string;
+  assigneeMemberId?: string;
+  reporterMemberId?: string;
+  externalRefs?: unknown;
+  metadata?: unknown;
+  transitionReason?: string;
+  actorType?: string;
+  actorName?: string;
 }
 
 export interface SendMessageInput {

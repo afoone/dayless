@@ -54,7 +54,7 @@ function TypingIndicator() {
 }
 
 export default function ChatView() {
-  const { selectedTeamId, currentMember } = useAppStore()
+  const { currentMember } = useAppStore()
   const [messages, setMessages] = useState<DisplayMessage[]>([])
   const [members, setMembers] = useState<TeamMember[]>([])
   const [inputValue, setInputValue] = useState('')
@@ -64,15 +64,16 @@ export default function ChatView() {
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  // Load messages and members when team changes
+  // Load messages and members for the authenticated user's team
   useEffect(() => {
-    if (!selectedTeamId) return
+    const teamId = currentMember?.teamId
+    if (!teamId) return
     setIsLoading(true)
     setMessages([])
 
     Promise.all([
-      getMessages(selectedTeamId, 100),
-      getMembers(selectedTeamId),
+      getMessages(teamId, 100),
+      getMembers(teamId),
     ]).then(([msgsResult, membersResult]) => {
       if (msgsResult.success && msgsResult.data) {
         const rawMsgs = Array.isArray(msgsResult.data) ? msgsResult.data : []
@@ -88,7 +89,7 @@ export default function ChatView() {
         setMembers(membersResult.data)
       }
     }).catch(console.error).finally(() => setIsLoading(false))
-  }, [selectedTeamId])
+  }, [currentMember?.teamId])
 
   const scrollToBottom = useCallback(() => {
     requestAnimationFrame(() => {
@@ -101,7 +102,8 @@ export default function ChatView() {
   useEffect(() => { scrollToBottom() }, [messages, isTyping, scrollToBottom])
 
   const handleSend = async () => {
-    if (!inputValue.trim() || !selectedTeamId || isTyping) return
+    const teamId = currentMember?.teamId
+    if (!inputValue.trim() || !teamId || isTyping) return
 
     const content = inputValue.trim()
     setInputValue('')
@@ -120,7 +122,7 @@ export default function ChatView() {
     setIsTyping(true)
     try {
       const result = await sendChatMessage(
-        selectedTeamId,
+        teamId,
         currentMember?.id || null,
         currentMember?.name || 'User',
         content,
@@ -148,6 +150,7 @@ export default function ChatView() {
           ]
         })
       } else {
+        setInputValue(content)
         // Show error
         setMessages(prev => [...prev, {
           id: `error-${Date.now()}`,
@@ -158,6 +161,7 @@ export default function ChatView() {
         }])
       }
     } catch {
+      setInputValue(content)
       setMessages(prev => [...prev, {
         id: `error-${Date.now()}`,
         senderName: 'System',
@@ -364,7 +368,7 @@ export default function ChatView() {
               className="flex-1 min-h-[44px] max-h-[160px] resize-none rounded-xl border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 placeholder:text-slate-400 focus-visible:ring-emerald-500/20 focus-visible:border-emerald-400"
               rows={1}
             />
-            <Button onClick={handleSend} disabled={!inputValue.trim() || isTyping || !selectedTeamId}
+            <Button onClick={handleSend} disabled={!inputValue.trim() || isTyping || !currentMember?.teamId}
               className="h-11 w-11 shrink-0 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm disabled:opacity-40">
               <Send className="size-4" />
             </Button>
