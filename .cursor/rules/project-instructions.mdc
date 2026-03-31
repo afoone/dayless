@@ -1,0 +1,435 @@
+---
+description: Global project instructions
+alwaysApply: true
+---
+
+# CLAUDE.md - Dayless.ai Development Guide
+
+This file defines how to build and maintain the Dayless.ai project. Follow these rules exactly. Do not deviate unless explicitly asked.
+
+## ENVIRONMENT
+
+- Framework: Next.js 16 with App Router (MANDATORY)
+- Language: TypeScript 5 (strict)
+- Runtime: bun (not npm, not yarn)
+- Database: Prisma ORM + SQLite (file at prisma/dev.db via `DATABASE_URL="file:./dev.db"`)
+- Styling: Tailwind CSS 4 + shadcn/ui (New York style)
+- State: Zustand (client) + TanStack Query (server)
+- Auth: NextAuth.js v4 (Credentials provider)
+- Animations: Framer Motion
+- Icons: Lucide React
+- AI: z-ai-web-dev-sdk (backend ONLY)
+- Realtime: Socket.io mini-services
+
+## Critical Rules
+
+- Port: ONLY 3000. Never use other ports in Next.js.
+- Single route: ALL UI is in `src/app/page.tsx` - a client component that switches views. Do NOT create new routes.
+- API routes: Use `/api/` routes, NOT server actions.
+- Gateway: External requests use XTransformPort query param. NEVER hardcode ports in URLs.
+- Dev server: Runs via `bun run dev`. Do NOT kill it or delete `.next` manually.
+- Database changes: Run `bun run db:push` (not migrations in dev).
+- AI SDK: `z-ai-web-dev-sdk` MUST be used in backend ONLY. Never import it in client components.
+- Preview: NEVER tell user to visit localhost:3000. Use "Preview Panel" instead.
+
+## PROJECT STRUCTURE
+
+```text
+src/
+|-- app/
+|   |-- layout.tsx              # Root layout - providers wrapper only
+|   |-- page.tsx                # Single page - view router (CLIENT)
+|   |-- globals.css             # Tailwind imports
+|   `-- api/
+|       |-- auth/[...nextauth]/ # NextAuth handler
+|       |-- auth/register/      # User registration
+|       |-- teams/              # CRUD teams
+|       |-- members/            # CRUD members
+|       |-- projects/           # CRUD projects
+|       |-- knowledge/          # CRUD knowledge entries
+|       |-- standup/            # Standup check-ins
+|       |-- reports/            # Daily reports
+|       |-- messages/           # Chat messages
+|       |-- chat/               # AI chat (LLM integration)
+|       |-- github/issues/      # GitHub Issues
+|       |-- github/[id]/        # GitHub Issue detail
+|       |-- jira/issues/        # Jira Issues
+|       |-- jira/[key]/         # Jira Issue detail
+|       `-- seed/               # Demo data seeder
+|-- components/
+|   |-- ui/                    # shadcn/ui - DO NOT MODIFY
+|   |-- layout/                # sidebar.tsx, header.tsx
+|   |-- views/                 # One file per view (dashboard, chat, teams, etc.)
+|   |-- auth/                  # AuthGate (login screen)
+|   `-- providers.tsx          # Client providers wrapper
+|-- lib/
+|   |-- db.ts                  # Prisma client singleton
+|   |-- api.ts                 # Frontend API client (all fetch calls)
+|   |-- auth.ts                # NextAuth config
+|   |-- github.ts              # GitHub REST API wrapper
+|   |-- jira.ts                # Jira Cloud REST API wrapper
+|   |-- utils.ts               # cn() helper from shadcn
+|   `-- store.ts               # Zustand store (if used)
+|-- store/
+|   `-- app-store.ts           # Zustand global store
+|-- types/
+|   |-- index.ts               # All TypeScript interfaces
+|   `-- next-auth.d.ts         # NextAuth type extensions
+|-- mini-services/
+|   `-- chat-service/          # Socket.io realtime (port 3005)
+|-- scripts/
+|   `-- setup-db.ts            # DB setup helper
+`-- prisma/
+    `-- schema.prisma          # Database schema
+```
+
+## UI/UX DESIGN SYSTEM
+
+### Color Rules
+
+- NEVER use indigo or blue as primary color (unless user explicitly requests it)
+- Project accent color: emerald (`#10b981`)
+- Background: `bg-white` (cards), `bg-slate-50/50` (content areas)
+- Text hierarchy:
+  - Titles: `text-slate-900`, `font-bold`, `tracking-tight`
+  - Body: `text-slate-700`
+  - Secondary: `text-slate-500`
+  - Tertiary/muted: `text-slate-400`
+- Status colors: emerald (success), amber (warning), red (error), violet (info)
+- Use Tailwind CSS variables: `bg-primary`, `text-primary-foreground`, etc.
+- Dark/light mode via `next-themes` (use `class` attribute)
+
+### Typography
+
+- Fonts: Geist Sans + Geist Mono (via `next/font/google`)
+- Heading sizes: `text-3xl` (hero), `text-2xl font-bold` (page title), `text-lg font-semibold` (card title), `text-sm font-medium` (label)
+- Body: `text-sm`, `leading-relaxed`
+- Meta: `text-xs`, `text-[11px]`, `text-[10px]`
+
+### Layout Rules (MANDATORY)
+
+- Sticky footer: Use `min-h-screen flex flex-col` on root, `mt-auto` on footer
+- Mobile-first: Design for mobile first, then `sm:`, `md:`, `lg:`, `xl:`
+- Touch targets: Minimum 44px for all interactive elements
+- Sidebar: Fixed width, collapsible. Use `w-[260px]` expanded, `w-[68px]` collapsed
+- Cards: `border-slate-200/80 bg-white shadow-sm hover:shadow-md transition-shadow`
+- Spacing: Use `p-5` or `p-6` for card content, `gap-4` or `gap-6` between elements
+
+### Components
+
+- ALWAYS use shadcn/ui components. NEVER build custom when a shadcn component exists.
+- Available: Button, Card, Dialog, Badge, Input, Label, Select, Switch, Separator, Tabs, Avatar, DropdownMenu, Tooltip, ScrollArea, Progress, Skeleton, Toast, Sheet, Textarea, Table, Popover, Calendar, Checkbox, RadioGroup, Accordion, etc.
+- Icons: ALWAYS use Lucide React. Size convention: `size-4` (small), `size-5` (default), `size-6+` (hero)
+- Toast notifications: `import { toast } from 'sonner'`
+
+### Animations
+
+- Use Framer Motion for ALL transitions
+- Standard pattern:
+
+```tsx
+const containerVariants = {
+  hidden: { opacity: 0 },
+  visible: { opacity: 1, transition: { staggerChildren: 0.08 } },
+}
+const itemVariants = {
+  hidden: { opacity: 0, y: 20 },
+  visible: { opacity: 1, y: 0, transition: { duration: 0.4, ease: 'easeOut' } },
+}
+// Usage: <motion.div variants={containerVariants} initial="hidden" animate="visible">
+```
+
+- Page transitions in `page.tsx`:
+
+```tsx
+<AnimatePresence mode="wait">
+  <motion.div key={currentView} initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -10 }}>
+    <ViewComponent />
+  </motion.div>
+</AnimatePresence>
+```
+
+- Loading states: Use Skeleton component, not spinners
+- Typing indicators: bouncing dots with stagger animation
+
+### Lists & Scroll
+
+- Long lists: `max-h-96 overflow-y-auto` (or `max-h-[420px]`)
+- Custom scrollbar styling:
+
+```css
+.custom-scrollbar::-webkit-scrollbar { width: 4px; }
+.custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+.custom-scrollbar::-webkit-scrollbar-thumb { background-color: #e2e8f0; border-radius: 4px; }
+```
+
+## CODE PATTERNS
+
+### API Route Pattern
+
+```typescript
+// src/app/api/[entity]/route.ts
+import { NextRequest, NextResponse } from 'next/server'
+import { db } from '@/lib/db'
+
+export async function GET(request: NextRequest) {
+  try {
+    const { searchParams } = new URL(request.url)
+    const teamId = searchParams.get('teamId')
+
+    const items = await db.entity.findMany({
+      where: teamId ? { teamId } : undefined,
+      orderBy: { createdAt: 'desc' },
+    })
+
+    return NextResponse.json({ success: true, data: items })
+  } catch (error) {
+    return NextResponse.json({ success: false, error: String(error) }, { status: 500 })
+  }
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const body = await request.json()
+    const item = await db.entity.create({ data: body })
+    return NextResponse.json({ success: true, data: item })
+  } catch (error) {
+    return NextResponse.json({ success: false, error: String(error) }, { status: 500 })
+  }
+}
+```
+
+### API Client Pattern
+
+```typescript
+// src/lib/api.ts
+async function apiFetch<T>(endpoint: string, options: RequestInit = {}): Promise<ApiResponse<T>> {
+  const response = await fetch(`/api/${endpoint}`, {
+    headers: { "Content-Type": "application/json", ...options.headers },
+    ...options,
+  })
+  const json = await response.json()
+  if (!response.ok) return { success: false, data: null, error: json.error || 'Request failed' }
+  if (typeof json.success === 'boolean') return json as ApiResponse<T>
+  return { success: true, data: json as T, error: null }
+}
+
+// Entity CRUD
+export const getTeams = () => apiFetch<Team[]>('teams')
+export const createTeam = (input: CreateTeamInput) => apiFetch<Team>('teams', { method: 'POST', body: JSON.stringify(input) })
+// ... etc
+```
+
+### View Component Pattern
+
+```typescript
+'use client'
+
+import { useState, useEffect } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
+import { SomeIcon } from 'lucide-react'
+import { apiFetch } from '@/lib/api'
+
+const containerVariants = { hidden: { opacity: 0 }, visible: { opacity: 1, transition: { staggerChildren: 0.08 } } }
+const itemVariants = { hidden: { opacity: 0, y: 20 }, visible: { opacity: 1, y: 0, transition: { duration: 0.4 } } }
+
+export default function SomeView() {
+  const [items, setItems] = useState([])
+  const [isLoading, setIsLoading] = useState(true)
+
+  useEffect(() => {
+    apiFetch<Item[]>('some-endpoint').then(res => {
+      if (res.success && res.data) setItems(res.data)
+      setIsLoading(false)
+    })
+  }, [])
+
+  return (
+    <motion.div className="space-y-6 p-4 md:p-6 lg:p-8" variants={containerVariants} initial="hidden" animate="visible">
+      {/* Page Header */}
+      <motion.div variants={itemVariants}>
+        <h1 className="text-2xl font-bold text-slate-900">Page Title</h1>
+        <p className="text-sm text-slate-500 mt-1">Description text</p>
+      </motion.div>
+
+      {/* Content */}
+      {isLoading ? (
+        <div className="space-y-3">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-24" />)}</div>
+      ) : (
+        <motion.div variants={itemVariants}>
+          {/* ... */}
+        </motion.div>
+      )}
+    </motion.div>
+  )
+}
+```
+
+### Page Router Pattern (`page.tsx`)
+
+```typescript
+'use client'
+
+import { useAppStore } from '@/store/app-store'
+import { AnimatePresence, motion } from 'framer-motion'
+
+const viewComponents: Record<AppView, React.ComponentType> = {
+  dashboard: DashboardView,
+  chat: ChatView,
+  teams: TeamsView,
+  // ... all views
+}
+
+export default function Home() {
+  const { currentView } = useAppStore()
+  const ViewComponent = viewComponents[currentView]
+
+  return (
+    <div className="flex h-screen bg-white overflow-hidden">
+      <AppSidebar />
+      <div className="flex flex-1 flex-col min-w-0 overflow-hidden">
+        <AppHeader />
+        <main className="flex-1 overflow-auto bg-slate-50/50">
+          <AnimatePresence mode="wait">
+            <motion.div key={currentView} initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -10 }} transition={{ duration: 0.2 }} className="h-full">
+              <ViewComponent />
+            </motion.div>
+          </AnimatePresence>
+        </main>
+      </div>
+    </div>
+  )
+}
+```
+
+### Mini-Service Pattern (WebSocket/Socket.io)
+
+```typescript
+// mini-services/[service]/index.ts
+import { Server } from 'socket.io'
+
+const PORT = 3005
+const io = new Server(PORT, { cors: { origin: '*' } })
+
+io.on('connection', (socket) => {
+  socket.on('join:team', (teamId) => {
+    socket.join(teamId)
+  })
+  // ... more events
+})
+
+console.log(`[service] Running on port ${PORT}`)
+```
+
+Frontend connects: `io('/?XTransformPort=3005')` - NEVER hardcode the URL.
+
+### External API Integration Pattern (GitHub, Jira, etc.)
+
+```typescript
+// src/lib/[service].ts
+export interface ServiceIssue { /* fields */ }
+
+export async function listIssues(owner: string, repo: string, token: string) {
+  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/issues`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github.v3+json' },
+  })
+  return res.json()
+}
+
+export function formatIssuesForAI(issues: ServiceIssue[]): string {
+  return issues.map(i => `- [${i.key}] ${i.title} (${i.status})`).join('\n')
+}
+
+export function parseRepoUrl(url: string) { /* parse owner/repo */ }
+```
+
+## Prisma Client Cache Warning
+
+IMPORTANT: When adding NEW models to `schema.prisma` after the dev server has already started, the cached Prisma client in `globalThis` will NOT include the new model. This causes `db.newModel` to be undefined.
+
+Solutions (pick one):
+
+1. Restart the dev server after schema changes
+2. Use raw SQL: `db.$queryRawUnsafe('SELECT * FROM "NewTable"')`
+3. Create fresh PrismaClient per call: `const prisma = new PrismaClient()`
+
+## AI CHAT PATTERN (core feature)
+
+The AI chat is the central feature. The flow in `/api/chat/route.ts`:
+
+1. Receive user message (`teamId`, `senderId`, `senderName`, `content`)
+2. Save user message to DB
+3. Build context by gathering:
+   - Current team info + member list
+   - Relevant Knowledge Base entries
+   - Open GitHub Issues from connected projects
+   - Open Jira Issues from connected projects
+   - Recent chat history (last 20 messages)
+4. Construct system prompt with:
+   - Role definition (Scrum Master persona)
+   - Team context (members, projects)
+   - Knowledge base
+   - Issue summaries from GitHub/Jira
+   - Instructions for special actions
+5. Call LLM via `z-ai-web-dev-sdk`
+6. Parse AI response for special actions:
+   - `[GITHUB_ACTION: create_issue | repo: ... | title: ...]`
+   - `[JIRA_ACTION: create_issue | project: ... | summary: ...]`
+   - Knowledge Entry auto-extraction
+7. Execute actions (create issues, update status, etc.)
+8. Save AI response to DB
+9. Return both user message and AI message
+
+## AUTHENTICATION PATTERN
+
+- NextAuth v4 Credentials provider
+- JWT sessions (30-day maxAge)
+- Auto-register: if user doesn't exist, create on first login (password >= 6 chars)
+- Use raw SQL for User model access to avoid Prisma cache issues
+- AuthGate component wraps the entire app
+- `useSession()` hook for session detection (NOT manual fetch)
+- Logout: `window.location.href = '/'` (full reload, NOT `router.refresh`)
+
+## LANDING PAGE PATTERN
+
+When building a landing page:
+
+- Create as a standalone component, NOT inside the app router
+- Full-width sections with `min-h-screen` or `py-20 md:py-32`
+- Hero: Large heading (`text-4xl md:text-6xl font-bold`), subtitle, CTA buttons
+- Feature grid: 3-column on desktop, 1-column on mobile
+- Social proof: logos, testimonials, stats
+- Use `bg-gradient-to-br from-slate-50 via-white to-[accent]-50/30` for subtle gradients
+- Decorative blobs: absolute rounded-full `bg-[accent]-100/40 blur-3xl` positioned off-screen
+- CTA sections with emerald accent buttons
+- Smooth scroll between sections
+- Framer Motion fade-in animations on scroll (use IntersectionObserver or whileInView)
+
+## COMMON MISTAKES TO AVOID
+
+- DO NOT create new routes in `app/` directory - everything goes in `page.tsx`
+- DO NOT import `z-ai-web-dev-sdk` in client components
+- DO NOT hardcode ports in URLs - use `XTransformPort` query param
+- DO NOT use `router.refresh()` for auth state changes - use `window.location.href`
+- DO NOT delete `.next` while the dev server is running
+- DO NOT use indigo/blue as primary colors
+- DO NOT build custom UI components when shadcn/ui has them
+- DO NOT skip responsive design - mobile-first always
+- DO NOT forget sticky footer with `min-h-screen flex flex-col + mt-auto`
+- DO NOT use `useState` for side effects - use `useEffect`
+
+## GIT CONVENTIONS
+
+- Commit messages in English, imperative mood: "Add GitHub Issues integration"
+- Feature branches: `feature/github-integration`
+- One logical change per commit
+
+## TESTING
+
+- Do NOT write test files
+- Manual testing via Preview Panel
+- Use `bun run lint` to check code quality before delivering
+- Verify all API endpoints return `{ success: true, data: ... }` format

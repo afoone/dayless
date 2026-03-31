@@ -114,3 +114,24 @@
 - Header has working logout button
 - Session stores user identity, matched to TeamMember records across teams
 - JWT-based sessions with 30-day expiry
+
+---
+## Task ID: 7 - DB Path Fix & Demo Users Re-seed
+### Agent: Main Agent
+### Task: Fix local Prisma DB path and restore demo login users
+
+### Work Log:
+- Detected auth failures (`POST /api/auth/callback/credentials` returning 401) during login attempts with demo users
+- Found invalid `DATABASE_URL` in `.env` pointing to a Linux-only path (`file:/home/z/my-project/db/custom.db`) on macOS
+- Updated `.env` to use local SQLite path: `DATABASE_URL="file:./dev.db"` (resolved under `prisma/dev.db`)
+- Ran `npm run db:push` successfully to create/sync the SQLite database for current schema
+- Re-seeded demo users with Prisma via Node runtime (without bun), verifying existing accounts:
+  - `ana@dayless.ai` / `demo1234`
+  - `carlos@dayless.ai` / `demo1234`
+- Confirmed schema sync and user presence in the active local database
+
+### Stage Summary:
+- Prisma now points to a valid local DB path for this machine
+- Migrations/schema sync are healthy (`db:push` successful)
+- Demo auth users restored in the active DB and ready for login
+- Suggested next hardening step: add `npm run seed:demo` script (Node-based) for repeatable local setup
