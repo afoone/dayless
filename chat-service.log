@@ -1,0 +1,2 @@
+$ bun --hot index.ts
+[Chat] Chat service running on port 3005

@@ -1,0 +1,154 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  name      String
+  avatar    String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships TeamMember[]
+
+  @@index([email])
+}
+
+model Team {
+  id          String       @id @default(cuid())
+  name        String
+  description String?
+  color       String       @default("#10b981")
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  members     TeamMember[]
+  projects    Project[]
+  messages    Message[]
+  knowledge   KnowledgeEntry[]
+  reports     DailyReport[]
+}
+
+model TeamMember {
+  id        String   @id @default(cuid())
+  teamId    String
+  userId    String?
+  name      String
+  role      String   @default("Developer")
+  email     String?
+  avatar    String?
+  status    String   @default("active") // active, away, offline
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  standups  StandupCheckin[]
+
+  @@index([teamId])
+  @@index([userId])
+}
+
+model Project {
+  id              String   @id @default(cuid())
+  teamId          String
+  name            String
+  description     String?
+  status          String   @default("active") // active, paused, completed
+  jiraProjectKey  String?
+  jiraBaseUrl     String?
+  jiraToken       String?
+  githubRepo      String?
+  githubToken     String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  team            Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@index([teamId])
+}
+
+model Message {
+  id         String   @id @default(cuid())
+  teamId     String
+  senderId   String?  // null for AI
+  senderName String
+  senderType String   @default("member") // member, ai, system
+  content    String
+  metadata   String?  // JSON string for additional context
+  createdAt  DateTime @default(now())
+
+  team       Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@index([teamId])
+  @@index([createdAt])
+}
+
+model KnowledgeEntry {
+  id         String   @id @default(cuid())
+  teamId     String
+  key        String
+  value      String
+  source     String?  // who provided this info
+  category   String   @default("general") // general, technical, process, blocker, decision
+  confidence Int      @default(80) // 0-100
+  isVerified Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  team       Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@index([teamId])
+  @@index([category])
+}
+
+model DailyReport {
+  id        String   @id @default(cuid())
+  teamId    String
+  date      String   // YYYY-MM-DD format
+  summary   String   // markdown content
+  status    String   @default("draft") // draft, published
+  createdAt DateTime @default(now())
+
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, date])
+  @@index([teamId])
+}
+
+model StandupCheckin {
+  id            String   @id @default(cuid())
+  memberId      String
+  date          String   // YYYY-MM-DD format
+  yesterdayWork String?
+  todayPlan     String?
+  blockers      String?
+  mood          String   @default("neutral") // great, good, neutral, stressed, blocked
+  createdAt     DateTime @default(now())
+
+  member        TeamMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@unique([memberId, date])
+  @@index([memberId])
+}
+
+model IntegrationLog {
+  id        String   @id @default(cuid())
+  teamId    String
+  type      String   // jira, github
+  action    String   // ticket_created, status_changed, comment_added, etc.
+  externalId String? // Jira issue key or GitHub issue number
+  data      String?  // JSON string with full response data
+  status    String   @default("success") // success, error
+  createdAt DateTime @default(now())
+
+  @@index([teamId])
+  @@index([type])
+}
