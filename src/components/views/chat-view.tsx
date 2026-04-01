@@ -6,14 +6,15 @@ import { useAppStore } from '@/store/app-store'
 import {
   getMessages,
   sendChatMessage,
-  confirmChatTicket,
+  confirmChatAction,
+  rejectChatAction,
   getMembers,
   getMemberProjects,
   broadcastProjectStandup,
   getProjectStandupSummary,
   postChatThreadMessage,
 } from '@/lib/api'
-import type { Message, TeamMember, Project, PendingInternalTicketConfirm } from '@/types'
+import type { Message, TeamMember, Project, PendingChatAction } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -44,7 +45,7 @@ interface DisplayMessage {
   senderType: 'member' | 'ai' | 'system'
   content: string
   createdAt: Date
-  pendingTicketConfirm?: PendingInternalTicketConfirm
+  pendingAction?: PendingChatAction
 }
 
 const quickActions = [
@@ -84,7 +85,7 @@ export default function ChatView() {
   const [isTyping, setIsTyping] = useState(false)
   const [showMembers, setShowMembers] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
-  const [confirmingTicketMessageId, setConfirmingTicketMessageId] = useState<string | null>(null)
+  const [confirmingActionMessageId, setConfirmingActionMessageId] = useState<string | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
@@ -151,62 +152,69 @@ export default function ChatView() {
     }).catch(console.error).finally(() => setIsLoading(false))
   }, [currentMember?.teamId, currentMember?.id, contextProjectId])
 
-  const handleDismissTicketDraft = useCallback((proposalMessageId: string) => {
-    setMessages((prev) =>
-      prev.map((m) =>
-        m.id === proposalMessageId ? { ...m, pendingTicketConfirm: undefined } : m
-      )
-    )
-    toast.message('Borrador descartado')
-  }, [])
-
-  const handleConfirmTicketDraft = useCallback(
-    async (draft: PendingInternalTicketConfirm, proposalMessageId: string) => {
+  const handleConfirmPendingAction = useCallback(
+    async (action: PendingChatAction, proposalMessageId: string) => {
       const teamId = currentMember?.teamId
       const ownerMemberId = currentMember?.id
       const projectId = contextProjectId
       if (!teamId || !ownerMemberId || !projectId) return
-      setConfirmingTicketMessageId(proposalMessageId)
+      setConfirmingActionMessageId(proposalMessageId)
       try {
-        const res = await confirmChatTicket(
+        const res = await confirmChatAction({
+          actionId: action.id,
           teamId,
           ownerMemberId,
           projectId,
-          currentMember?.id || null,
-          currentMember?.name || 'Usuario',
-          draft
-        )
-        if (res.success && res.data) {
-          setMessages((prev) => {
-            const cleared = prev.map((m) =>
-              m.id === proposalMessageId ? { ...m, pendingTicketConfirm: undefined } : m
-            )
-            return [
-              ...cleared,
-              {
-                id: res.data!.userMessage.id,
-                senderName: res.data!.userMessage.senderName,
-                senderType: res.data!.userMessage.senderType as 'member' | 'ai' | 'system',
-                content: res.data!.userMessage.content,
-                createdAt: new Date(res.data!.userMessage.createdAt),
-              },
-              {
-                id: res.data!.aiMessage.id,
-                senderName: res.data!.aiMessage.senderName,
-                senderType: 'ai',
-                content: res.data!.aiMessage.content,
-                createdAt: new Date(res.data!.aiMessage.createdAt),
-              },
-            ]
-          })
-          toast.success('Ticket creado')
+          senderName: currentMember?.name || 'Usuario',
+          action,
+        })
+        if (res.success && res.data?.message) {
+          setMessages((prev) => [
+            ...prev.map((m) => (m.id === proposalMessageId ? { ...m, pendingAction: undefined } : m)),
+            {
+              id: res.data.message.id,
+              senderName: res.data.message.senderName,
+              senderType: res.data.message.senderType as 'member' | 'ai' | 'system',
+              content: res.data.message.content,
+              createdAt: new Date(res.data.message.createdAt),
+            },
+          ])
+          toast.success('Acción confirmada')
         } else {
-          toast.error(res.error || 'No se pudo crear el ticket')
+          toast.error(res.error || 'No se pudo confirmar la acción')
         }
-      } catch {
-        toast.error('Error de conexión al crear el ticket')
       } finally {
-        setConfirmingTicketMessageId(null)
+        setConfirmingActionMessageId(null)
+      }
+    },
+    [currentMember, contextProjectId]
+  )
+
+  const handleRejectPendingAction = useCallback(
+    async (action: PendingChatAction, proposalMessageId: string) => {
+      const teamId = currentMember?.teamId
+      const ownerMemberId = currentMember?.id
+      const projectId = contextProjectId
+      if (!teamId || !ownerMemberId || !projectId) return
+      const res = await rejectChatAction({
+        actionId: action.id,
+        teamId,
+        ownerMemberId,
+        projectId,
+      })
+      if (res.success && res.data?.message) {
+        setMessages((prev) => [
+          ...prev.map((m) => (m.id === proposalMessageId ? { ...m, pendingAction: undefined } : m)),
+          {
+            id: res.data.message.id,
+            senderName: res.data.message.senderName,
+            senderType: res.data.message.senderType as 'member' | 'ai' | 'system',
+            content: res.data.message.content,
+            createdAt: new Date(res.data.message.createdAt),
+          },
+        ])
+      } else {
+        toast.error(res.error || 'No se pudo rechazar la acción')
       }
     },
     [currentMember, contextProjectId]
@@ -339,7 +347,7 @@ export default function ChatView() {
               senderType: 'ai',
               content: result.data!.aiMessage.content,
               createdAt: new Date(result.data!.aiMessage.createdAt),
-              pendingTicketConfirm: result.data!.pendingTicketConfirm,
+                pendingAction: result.data!.pendingAction,
             },
           ]
         })
@@ -556,43 +564,30 @@ export default function ChatView() {
                             <p className="whitespace-pre-wrap">{message.content}</p>
                           )}
                         </div>
-                        {isAI && message.pendingTicketConfirm && (
+                        {isAI && message.pendingAction && (
                           <div className="mt-3 w-full max-w-md space-y-3 rounded-xl border border-slate-200/90 bg-white p-4 shadow-sm">
                             <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                              Confirmar ticket
+                              Confirmar acción
                             </p>
-                            <p className="text-sm font-semibold text-slate-900 line-clamp-2">
-                              {message.pendingTicketConfirm.title}
-                            </p>
-                            <p className="text-xs text-slate-600 line-clamp-6 whitespace-pre-wrap leading-relaxed">
-                              {message.pendingTicketConfirm.description}
-                            </p>
-                            <p className="text-[11px] text-slate-500">
-                              Prioridad: <span className="font-medium text-slate-700">{message.pendingTicketConfirm.priority}</span>
-                              {message.pendingTicketConfirm.project ? (
-                                <> · Proyecto: <span className="font-medium text-slate-700">{message.pendingTicketConfirm.project}</span></>
-                              ) : null}
-                            </p>
+                            <p className="text-sm font-semibold text-slate-900 line-clamp-2">{message.pendingAction.title}</p>
+                            <p className="text-xs text-slate-600 line-clamp-6 whitespace-pre-wrap leading-relaxed">{message.pendingAction.summary}</p>
                             <div className="flex flex-wrap gap-2 pt-1">
                               <Button
                                 type="button"
                                 className="min-h-11 bg-emerald-600 hover:bg-emerald-700 text-white"
-                                disabled={confirmingTicketMessageId === message.id}
-                                onClick={() =>
-                                  handleConfirmTicketDraft(message.pendingTicketConfirm!, message.id)
-                                }
+                                disabled={confirmingActionMessageId === message.id}
+                                onClick={() => handleConfirmPendingAction(message.pendingAction!, message.id)}
                               >
-                                <Ticket className="size-4 mr-1.5" />
-                                Crear ticket
+                                Confirmar
                               </Button>
                               <Button
                                 type="button"
                                 variant="outline"
                                 className="min-h-11 border-slate-200 text-slate-700"
-                                disabled={confirmingTicketMessageId === message.id}
-                                onClick={() => handleDismissTicketDraft(message.id)}
+                                disabled={confirmingActionMessageId === message.id}
+                                onClick={() => handleRejectPendingAction(message.pendingAction!, message.id)}
                               >
-                                Descartar
+                                Rechazar
                               </Button>
                             </div>
                           </div>

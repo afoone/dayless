@@ -11,6 +11,7 @@ import type {
   KnowledgeEntry,
   DailyReport,
   StandupCheckin,
+  TicketProposal,
   CreateTeamInput,
   UpdateTeamInput,
   CreateMemberInput,
@@ -23,6 +24,7 @@ import type {
   UpdateKnowledgeInput,
   SubmitStandupInput,
   PendingInternalTicketConfirm,
+  PendingChatAction,
 } from "@/types";
 
 async function apiFetch<T>(
@@ -241,6 +243,31 @@ export const markAllNotificationsRead = (memberId: string) =>
     method: 'POST',
   })
 
+// --- Proposals ---
+export const getProposals = (filters: { teamId: string; status?: string; projectId?: string }) => {
+  const params = new URLSearchParams({ teamId: filters.teamId })
+  if (filters.status) params.set('status', filters.status)
+  if (filters.projectId) params.set('projectId', filters.projectId)
+  return apiFetch<TicketProposal[]>(`proposals?${params.toString()}`)
+}
+
+export const updateProposal = (id: string, payload: Partial<Pick<TicketProposal, 'title' | 'description' | 'priority'>>) =>
+  apiFetch<TicketProposal>(`proposals/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+
+export const approveProposal = (id: string) =>
+  apiFetch<TicketProposal>(`proposals/${encodeURIComponent(id)}/approve`, {
+    method: 'POST',
+  })
+
+export const rejectProposal = (id: string, reason: string) =>
+  apiFetch<TicketProposal>(`proposals/${encodeURIComponent(id)}/reject`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  })
+
 // --- Knowledge ---
 export const getKnowledge = (teamId?: string, category?: string) => {
   const params = new URLSearchParams();
@@ -275,6 +302,7 @@ export interface ChatResponse {
   userMessage: Message;
   aiMessage: Message;
   pendingTicketConfirm?: PendingInternalTicketConfirm;
+  pendingAction?: PendingChatAction;
 }
 export const sendChatMessage = (
   teamId: string,
@@ -314,6 +342,40 @@ export const confirmChatTicket = (
       senderId,
       senderName,
       confirmInternalTicket: draft,
+    }),
+  });
+
+export const confirmChatAction = (payload: {
+  actionId: string;
+  teamId: string;
+  ownerMemberId: string;
+  projectId: string;
+  senderName: string;
+  action: PendingChatAction;
+}) =>
+  apiFetch<{ message: Message }>(`chat/actions/${encodeURIComponent(payload.actionId)}/confirm`, {
+    method: "POST",
+    body: JSON.stringify({
+      teamId: payload.teamId,
+      ownerMemberId: payload.ownerMemberId,
+      projectId: payload.projectId,
+      senderName: payload.senderName,
+      action: payload.action,
+    }),
+  });
+
+export const rejectChatAction = (payload: {
+  actionId: string;
+  teamId: string;
+  ownerMemberId: string;
+  projectId: string;
+}) =>
+  apiFetch<{ message: Message }>(`chat/actions/${encodeURIComponent(payload.actionId)}/reject`, {
+    method: "POST",
+    body: JSON.stringify({
+      teamId: payload.teamId,
+      ownerMemberId: payload.ownerMemberId,
+      projectId: payload.projectId,
     }),
   });
 

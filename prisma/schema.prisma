@@ -41,6 +41,7 @@ model Team {
   knowledge   KnowledgeEntry[]
   reports     DailyReport[]
   tickets     Ticket[]
+  proposals   TicketProposal[]
   targetedTickets Ticket[] @relation("TicketTargetTeam")
   organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
 
@@ -71,6 +72,7 @@ model TeamMember {
   projectAssignments ProjectAssignment[]
   assignedTickets Ticket[] @relation("TicketAssignee")
   reportedTickets Ticket[] @relation("TicketReporter")
+  proposals       TicketProposal[] @relation("TicketProposalProposer")
   privateChatMessages Message[]
   notifications Notification[]
 
@@ -171,6 +173,7 @@ model Project {
   team            Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
   workflows       TicketWorkflow[]
   tickets         Ticket[]
+  proposals       TicketProposal[]
   defaultForMembers TeamMember[] @relation("MemberDefaultProject")
   memberAssignments ProjectAssignment[]
   chatMessages    Message[]
@@ -364,4 +367,31 @@ model IntegrationLog {
 
   @@index([teamId])
   @@index([type])
+}
+
+model TicketProposal {
+  id               String   @id @default(cuid())
+  teamId           String
+  projectId        String
+  proposerMemberId String
+  title            String
+  description      String
+  acceptanceCriteria String?
+  priority         String   @default("medium")
+  status           String   @default("pending_review") // draft, pending_review, approved, rejected
+  origin           String   @default("chat")
+  externalKey      String?
+  rejectReason     String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  reviewedAt       DateTime?
+  reviewedByMemberId String?
+
+  team             Team       @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  project          Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  proposer         TeamMember @relation("TicketProposalProposer", fields: [proposerMemberId], references: [id], onDelete: Cascade)
+
+  @@index([teamId, status])
+  @@index([projectId])
+  @@index([proposerMemberId])
 }

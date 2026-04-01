@@ -13,6 +13,7 @@ export type AppView =
   | "profile"
   | "teams"
   | "projects"
+  | "proposals"
   | "knowledge"
   | "reports"
   | "standup"
@@ -53,6 +54,7 @@ export interface TeamMember {
   defaultProjectId?: string | null;
   name: string;
   role: string;
+  teamRole?: "lead" | "member";
   email: string | null;
   avatar: string | null;
   status: "active" | "away" | "offline";
@@ -205,6 +207,24 @@ export interface IntegrationLog {
   createdAt: string;
 }
 
+export interface TicketProposal {
+  id: string;
+  teamId: string;
+  projectId: string;
+  proposerMemberId: string;
+  title: string;
+  description: string;
+  acceptanceCriteria: string | null;
+  priority: string;
+  status: "draft" | "pending_review" | "approved" | "rejected";
+  origin: string;
+  externalKey: string | null;
+  rejectReason: string | null;
+  reviewedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 // --------------- API Types ---------------
 
 export interface ApiResponse<T = unknown> {
@@ -222,6 +242,20 @@ export interface PendingInternalTicketConfirm {
   estimate?: string;
   assigneeEmail?: string;
   targetTeam?: string;
+}
+
+export type ChatActionType =
+  | "ticket_proposal"
+  | "knowledge_entry"
+  | "ticket_update"
+  | "standup_checkin";
+
+export interface PendingChatAction {
+  id: string;
+  type: ChatActionType;
+  title: string;
+  summary: string;
+  payload: Record<string, unknown>;
 }
 
 // --------------- Create / Update Input Types ---------------

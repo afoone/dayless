@@ -14,6 +14,7 @@ import KanbanView from '@/components/views/kanban-view'
 import ProfileView from '@/components/views/profile-view'
 import TeamsView from '@/components/views/teams-view'
 import ProjectsView from '@/components/views/projects-view'
+import ProposalsView from '@/components/views/proposals-view'
 import KnowledgeView from '@/components/views/knowledge-view'
 import StandupView from '@/components/views/standup-view'
 import ReportsView from '@/components/views/reports-view'
@@ -29,6 +30,7 @@ const viewComponents: Record<AppView, React.ComponentType> = {
   profile: ProfileView,
   teams: TeamsView,
   projects: ProjectsView,
+  proposals: ProposalsView,
   knowledge: KnowledgeView,
   standup: StandupView,
   reports: ReportsView,

@@ -24,6 +24,7 @@ const viewLabels: Record<string, string> = {
   profile: 'Profile',
   teams: 'Teams',
   projects: 'Projects',
+  proposals: 'Proposals',
   knowledge: 'Knowledge Base',
   standup: 'Daily Standup',
   reports: 'Reports',
