@@ -51,7 +51,7 @@ const navItems: { id: AppView; label: string; icon: React.ElementType; badge?: s
 ]
 
 function NavContent({ collapsed, onNavigate }: { collapsed: boolean; onNavigate?: () => void }) {
-  const { currentView, setCurrentView, teams, currentMember } = useAppStore()
+  const { currentView, setCurrentView, teams, currentMember, unreadNotifications } = useAppStore()
   const memberTeam = teams.find((t) => t.id === currentMember?.teamId)
 
   return (
@@ -110,9 +110,9 @@ function NavContent({ collapsed, onNavigate }: { collapsed: boolean; onNavigate?
                     </motion.span>
                   )}
                 </AnimatePresence>
-                {!collapsed && item.badge && (
+                {!collapsed && ((item.id === 'chat' && unreadNotifications > 0) || (item.id !== 'chat' && item.badge)) && (
                   <Badge className="ml-auto h-5 min-w-5 px-1.5 text-[10px] bg-emerald-500/20 text-emerald-400 border-emerald-500/30">
-                    {item.badge}
+                    {item.id === 'chat' ? String(unreadNotifications) : item.badge}
                   </Badge>
                 )}
               </Button>

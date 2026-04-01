@@ -20,6 +20,7 @@ interface AppState {
   pendingOpenStandupDialog: boolean;
 
   teams: Team[];
+  unreadNotifications: number;
 
   // --- Actions: Navigation ---
   setCurrentView: (view: AppView) => void;
@@ -34,6 +35,8 @@ interface AppState {
   clearPendingStandupDialog: () => void;
 
   setTeams: (teams: Team[]) => void;
+  setUnreadNotifications: (count: number) => void;
+  incrementUnreadNotifications: () => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -44,6 +47,7 @@ export const useAppStore = create<AppState>((set) => ({
   contextProjectId: null,
   pendingOpenStandupDialog: false,
   teams: [],
+  unreadNotifications: 0,
 
   // --- Navigation Actions ---
   setCurrentView: (view) => set({ currentView: view }),
@@ -82,4 +86,7 @@ export const useAppStore = create<AppState>((set) => ({
   clearPendingStandupDialog: () => set({ pendingOpenStandupDialog: false }),
 
   setTeams: (teams) => set({ teams }),
+  setUnreadNotifications: (count) => set({ unreadNotifications: Math.max(0, count) }),
+  incrementUnreadNotifications: () =>
+    set((state) => ({ unreadNotifications: state.unreadNotifications + 1 })),
 }));

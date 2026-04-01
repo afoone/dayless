@@ -209,6 +209,38 @@ export const getProjectStandupSummary = (
   return apiFetch<ProjectStandupSummary>(`project-standup/summary?${params.toString()}`);
 };
 
+// --- Notifications ---
+export type NotificationItem = {
+  id: string
+  memberId: string
+  teamId: string
+  type: string
+  title: string
+  body: string | null
+  metadata: string | null
+  isRead: boolean
+  readAt: string | null
+  createdAt: string
+}
+
+export const getNotifications = (memberId: string, unreadOnly = false, limit = 50) =>
+  apiFetch<NotificationItem[]>(
+    `notifications?memberId=${encodeURIComponent(memberId)}&unreadOnly=${unreadOnly ? 'true' : 'false'}&limit=${limit}`
+  )
+
+export const getNotificationCount = (memberId: string) =>
+  apiFetch<{ unreadCount: number }>(`notifications/count?memberId=${encodeURIComponent(memberId)}`)
+
+export const markNotificationRead = (id: string) =>
+  apiFetch<NotificationItem | { alreadyRead: true }>(`notifications/${encodeURIComponent(id)}/read`, {
+    method: 'PATCH',
+  })
+
+export const markAllNotificationsRead = (memberId: string) =>
+  apiFetch<{ updated: number }>(`notifications?memberId=${encodeURIComponent(memberId)}`, {
+    method: 'POST',
+  })
+
 // --- Knowledge ---
 export const getKnowledge = (teamId?: string, category?: string) => {
   const params = new URLSearchParams();

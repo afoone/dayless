@@ -59,12 +59,31 @@ Dayless es un **Scrum Master IA** que elimina reuniones. No es una app de gestio
 
 ## ARCHITECTURE DECISIONS
 
+### Multi-tenant: Organization > Team > User
+
+- **Organization** = tenant, entidad de facturacion. Se paga por usuario.
+- **User** = quien se loguea. Pertenece a una org via OrgMember.
+- **Team** = grupo de trabajo dentro de la org. Un user puede estar en multiples equipos.
+- Todo dato se filtra por `organizationId` (tenant isolation).
+
+### Roles (simples, sin RBAC)
+
+**Nivel org:** owner (billing + todo), admin (gestionar equipos/miembros), member (usar la app)
+**Nivel equipo:** lead (aprobar propuestas, abrir estimaciones/retros), member (chat, proponer, votar)
+
+`jobTitle` (ej: "Senior Backend Developer") es texto libre para contexto de la IA, no un permiso.
+
+Permisos se derivan del rol, no hay tabla de permisos:
+```typescript
+const canApproveProposals = (m: TeamMember) => m.teamRole === 'lead'
+const canManageTeam = (o: OrgMember) => o.role === 'owner' || o.role === 'admin'
+```
+
 ### El tracker externo es la fuente de verdad
 
 - Los tickets viven en el tracker (Jira, Linear, GitHub Issues). Si no hay tracker, TicketCache local es la fuente minima.
 - Dayless cachea datos del tracker en `TicketCache` para dar contexto a la IA.
 - Cuando la IA refina un ticket (AC, estimacion), actualiza el tracker via adapter (si soporta write). Si no, actualiza TicketCache local.
-- Los estados de tickets se leen del tracker, no se gestionan localmente.
 - **Dayless funciona sin integracion**: tickets se pueden importar via CSV/XML/JSON o pegar en el chat.
 
 ### Adapter Layer (src/lib/ticket-source.ts)
@@ -78,37 +97,44 @@ Toda interaccion con trackers pasa por una capa de abstraccion:
 ### Chat 1:1 con la IA (no global)
 
 - Cada miembro tiene su hilo privado con la IA, por proyecto.
-- Esto es una ventaja: la gente es mas honesta en privado.
-- La IA cruza informacion entre miembros SIN exponer quien dijo que (salvo que sea relevante y publico, como un blocker tecnico).
+- La gente es mas honesta en privado con la IA.
+- La IA cruza informacion entre miembros SIN exponer quien dijo que.
 
 ### Propuestas de ticket (no creacion directa)
 
 - Cualquier miembro puede proponer un ticket desde el chat.
 - La propuesta queda en cola de revision.
-- Solo miembros con `canApproveTickets = true` pueden aprobar.
-- Al aprobar, se crea en el tracker automaticamente (si hay integracion) o en TicketCache local.
+- Solo miembros con `teamRole = 'lead'` pueden aprobar.
+- Al aprobar, se crea en el tracker (si hay integracion) o en TicketCache local.
 - Al rechazar, la IA notifica al autor con el motivo.
 
 ### Conocimiento = decisiones del equipo
 
-- El modelo KnowledgeEntry guarda decisiones, acuerdos, y contexto importante.
-- La IA extrae y propone guardar cuando detecta una decision en la conversacion.
-- El miembro confirma antes de guardar.
-- La IA consulta el knowledge base antes de responder para no contradecir decisiones previas.
+- KnowledgeEntry guarda decisiones, acuerdos, y contexto importante.
+- La IA propone guardar cuando detecta una decision. El miembro confirma.
+- La IA consulta el knowledge base antes de responder.
 
 ## DATA MODEL (ver DESIGN.md para detalle completo)
 
-### Modelos que SE MANTIENEN (con ajustes)
+### Auth y Organizacion
 
-- **User** - Auth identity
-- **Team** - Equipo con storyPointGuide, sprintLengthDays
-- **TeamMember** - Con `canApproveTickets: Boolean @default(false)`
+- **User** - Auth identity (email, password, name)
+- **Organization** - Tenant, entidad de facturacion (name, slug, plan, maxUsers)
+- **OrgMember** - Enlace User <> Org con rol (owner, admin, member)
+
+### Equipos y Proyectos
+
+- **Team** - Equipo dentro de una org (storyPointGuide, sprintLengthDays)
+- **TeamMember** - Enlace User <> Team con teamRole (lead, member) y jobTitle
 - **Project** - Con config de trackers (Jira, Linear, GitHub) o sin integracion
 - **ProjectAssignment** - Asignacion miembro-proyecto
+
+### Core
+
 - **Message** - Chat 1:1 con IA (por ownerMemberId + projectId)
 - **KnowledgeEntry** - Decisiones y conocimiento del equipo
 - **DailyReport** - Standups generados por la IA
-- **StandupCheckin** - Input de cada miembro (o generado por IA desde el chat)
+- **StandupCheckin** - Input de cada miembro (manual o extraido por IA)
 - **IntegrationLog** - Audit de acciones en trackers
 
 ### Modelos NUEVOS

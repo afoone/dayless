@@ -17,12 +17,14 @@ model User {
   updatedAt DateTime @updatedAt
 
   memberships TeamMember[]
+  orgMemberships OrgMember[]
 
   @@index([email])
 }
 
 model Team {
   id          String       @id @default(cuid())
+  organizationId String?
   name        String
   description String?
   color       String       @default("#10b981")
@@ -32,20 +34,28 @@ model Team {
   updatedAt   DateTime     @updatedAt
 
   members     TeamMember[]
+  notifications Notification[]
+  invitations Invitation[]
   projects    Project[]
   messages    Message[]
   knowledge   KnowledgeEntry[]
   reports     DailyReport[]
   tickets     Ticket[]
   targetedTickets Ticket[] @relation("TicketTargetTeam")
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
 }
 
 model TeamMember {
   id        String   @id @default(cuid())
   teamId    String
   userId    String?
+  orgMemberId String?
   defaultProjectId String?
   name      String
+  teamRole  String   @default("member") // lead, member
+  jobTitle  String?
   role      String   @default("Developer")
   email     String?
   avatar    String?
@@ -55,16 +65,93 @@ model TeamMember {
 
   team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
   user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  orgMember OrgMember? @relation(fields: [orgMemberId], references: [id], onDelete: SetNull)
   defaultProject Project? @relation("MemberDefaultProject", fields: [defaultProjectId], references: [id], onDelete: SetNull)
   standups  StandupCheckin[]
   projectAssignments ProjectAssignment[]
   assignedTickets Ticket[] @relation("TicketAssignee")
   reportedTickets Ticket[] @relation("TicketReporter")
   privateChatMessages Message[]
+  notifications Notification[]
 
   @@index([teamId])
   @@index([userId])
+  @@index([orgMemberId])
   @@index([defaultProjectId])
+}
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  plan      String   @default("free")
+  maxUsers  Int      @default(5)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members      OrgMember[]
+  teams        Team[]
+  invitations  Invitation[]
+}
+
+model OrgMember {
+  id             String   @id @default(cuid())
+  userId         String
+  organizationId String
+  role           String   @default("member") // owner, admin, member
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  teamMemberships TeamMember[]
+  sentInvitations Invitation[] @relation("InvitationInvitedBy")
+
+  @@unique([userId, organizationId])
+  @@index([organizationId])
+}
+
+model Invitation {
+  id             String   @id @default(cuid())
+  organizationId String
+  teamId         String
+  email          String
+  teamRole       String   @default("member")
+  jobTitle       String?
+  token          String   @unique
+  status         String   @default("pending") // pending, accepted, expired, revoked
+  invitedById    String
+  expiresAt      DateTime
+  acceptedAt     DateTime?
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  team         Team         @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  invitedBy    OrgMember    @relation("InvitationInvitedBy", fields: [invitedById], references: [id], onDelete: Cascade)
+
+  @@index([token])
+  @@index([email, organizationId])
+  @@index([organizationId, status])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  memberId  String
+  teamId    String
+  type      String
+  title     String
+  body      String?
+  metadata  String?
+  isRead    Boolean  @default(false)
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+
+  member TeamMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  team   Team       @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@index([memberId, isRead])
+  @@index([memberId, createdAt])
+  @@index([teamId])
 }
 
 model Project {

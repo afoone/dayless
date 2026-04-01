@@ -1,7 +1,7 @@
 # Dayless.ai - Documento de Diseno Funcional y Tecnico
 
-> Version: 1.0 | Fecha: 2026-04-01
-> Estado: Diseno inicial
+> Version: 1.1 | Fecha: 2026-04-01
+> Estado: Diseno detallado (gaps completados)
 
 ---
 
@@ -147,43 +147,234 @@ El valor NO es la app. El valor es que la IA coordina sin que nadie tenga que ir
 - AI SDK: `z-ai-web-dev-sdk` SOLO en backend. Nunca importar en cliente
 - Base de datos: `bun run db:push` para cambios de schema
 
+### Middleware de autenticacion y permisos
+
+Todas las API routes (excepto `/api/auth/*` y `/api/register`) pasan por un middleware global que resuelve la identidad del usuario y sus permisos.
+
+#### Flujo de resolucion de identidad
+
+```
+Request → NextAuth session → session.user.id
+  → User
+  → OrgMember (organizationId + role)
+  → TeamMember[] (todos los equipos)
+  → currentTeamMember? (si la request incluye teamId)
+```
+
+#### Implementacion
+
+```typescript
+// src/middleware.ts
+// Next.js Middleware que intercepta /api/* (excepto auth/register)
+// Verifica session valida, inyecta headers con userId
+
+// src/lib/auth-context.ts
+interface AuthContext {
+  user: User
+  orgMember: OrgMember
+  organization: Organization
+  teamMemberships: TeamMember[]
+  currentTeamMember?: TeamMember  // resuelto si la request incluye teamId
+}
+
+async function resolveAuthContext(request: NextRequest): Promise<AuthContext>
+// 1. Obtiene session de NextAuth
+// 2. Carga User + OrgMember + Organization
+// 3. Si hay teamId en query/body, resuelve currentTeamMember
+// 4. Throws 401 si no hay session, 403 si no pertenece al team
+
+// Helpers de permisos (derivados del rol, sin RBAC)
+function requireOrgRole(ctx: AuthContext, role: 'owner' | 'admin'): void
+function requireTeamRole(ctx: AuthContext, teamId: string, role: 'lead'): void
+function requireTeamAccess(ctx: AuthContext, teamId: string): void
+```
+
+#### Patron de uso en API routes
+
+```typescript
+// src/app/api/proposals/[id]/approve/route.ts
+export async function POST(request: NextRequest) {
+  const ctx = await resolveAuthContext(request)
+  requireTeamRole(ctx, teamId, 'lead') // 403 si no es lead
+  // ... logica de aprobacion
+}
+```
+
+#### Tabla de permisos por endpoint
+
+| Endpoint | Permiso requerido |
+|----------|------------------|
+| `POST /api/proposals/:id/approve` | teamRole = lead |
+| `POST /api/proposals/:id/reject` | teamRole = lead |
+| `POST /api/estimations` | teamRole = lead |
+| `POST /api/retro` | teamRole = lead |
+| `POST /api/invitations` | orgRole = owner \| admin |
+| `DELETE /api/teams/:id` | orgRole = owner \| admin |
+| `PUT /api/organizations/:id` | orgRole = owner |
+| Resto de endpoints | teamAccess (ser miembro del equipo) |
+
+### Comunicacion en tiempo real (SSE)
+
+La app necesita notificar al usuario sin que refresque la pagina: nuevas notificaciones, mensajes en su chat, resultados de estimaciones, etc.
+
+#### Tecnologia: Server-Sent Events (SSE)
+
+SSE es unidireccional (servidor → cliente), suficiente para todos los casos de Dayless. Mas simple que WebSocket y compatible nativo con `EventSource` del navegador.
+
+#### Endpoint
+
+```
+GET /api/events/stream?memberId=X
+Content-Type: text/event-stream
+```
+
+#### Tipos de evento
+
+| Evento | Cuando se emite | Datos |
+|--------|----------------|-------|
+| `notification` | Nueva Notification creada para el miembro | `{ id, type, title }` |
+| `message` | Nuevo Message en un hilo del miembro | `{ id, projectId, senderType, preview }` |
+| `estimation_update` | Voto recibido, ronda revelada, sesion cerrada | `{ sessionId, event: 'vote'\|'reveal'\|'close' }` |
+| `proposal_update` | Propuesta aprobada/rechazada | `{ proposalId, status, reviewNote? }` |
+| `ticket_update` | TicketCache actualizado (status, estimate) | `{ ticketKey, field, newValue }` |
+
+#### Arquitectura
+
+```
+Accion (ej: lead aprueba propuesta)
+  → Crea Notification en BD
+  → Escribe evento en canal SSE del miembro destino
+  → Frontend recibe evento via EventSource
+  → Actualiza badge sidebar + muestra toast si aplica
+```
+
+#### Frontend
+
+```typescript
+// En AppShell (al montar, tras login)
+const source = new EventSource(`/api/events/stream?memberId=${member.id}`)
+source.addEventListener('notification', (e) => {
+  const data = JSON.parse(e.data)
+  incrementBadge(data.type)
+  showToast(data.title)
+})
+source.addEventListener('message', (e) => {
+  const data = JSON.parse(e.data)
+  if (data.projectId === currentProjectId) refreshChat()
+})
+// EventSource reconecta automaticamente si se pierde la conexion
+```
+
+#### Backend: emision de eventos
+
+```typescript
+// src/lib/sse.ts
+// Mapa en memoria de conexiones activas: memberId → Response stream
+const connections = new Map<string, Set<WritableStreamDefaultWriter>>()
+
+function emitToMember(memberId: string, event: string, data: unknown): void
+function emitToTeam(teamId: string, event: string, data: unknown): void
+```
+
+En un deploy con multiples instancias, el mapa en memoria se reemplaza por un pub/sub (Redis, Postgres LISTEN/NOTIFY). Para SQLite en dev, el mapa en memoria es suficiente.
+
 ---
 
 ## 3. Modelo de Datos Completo
 
-### Diagrama de relaciones
+### Multi-tenant y modelo de usuario
 
 ```
-User 1──N TeamMember N──1 Team
-                |              |
-                |              +──N Project
-                |              |      |
-                |              |      +──N ProjectAssignment ──N TeamMember
-                |              |      |
-                |              |      +──N TicketCache
-                |              |      |
-                |              |      +──N TicketProposal
-                |              |      |
-                |              |      +──N EstimationSession
-                |              |
-                |              +──N KnowledgeEntry
-                |              |
-                |              +──N DailyReport
-                |              |
-                |              +──N Retrospective
-                |              |
-                |              +──N IntegrationLog
-                |
-                +──N Message (chat 1:1 con IA, por proyecto)
-                |
-                +──N StandupCheckin
-                |
-                +──N EstimationVote
-                |
-                +──N RetroFeedback
+Organization (tenant, entidad de facturacion)
+  └── OrgMember (rol a nivel de org: owner, admin, member)
+       └── User (quien se loguea, quien paga)
+  └── Team (grupo de trabajo dentro de la org)
+       └── TeamMember (rol a nivel de equipo: lead, member)
+            └── Project
+                 └── ProjectAssignment
 ```
 
-### Modelos que SE MANTIENEN
+**Principio: todo gira en torno al usuario.** Se paga por usuario. Un usuario
+pertenece a una organizacion y puede estar en multiples equipos dentro de ella.
+
+### Diagrama de relaciones completo
+
+```
+Organization 1──N OrgMember N──1 User
+     |
+     +──N Team
+            |
+            +──N TeamMember ──1 User (via OrgMember)
+            |       |
+            |       +──N ProjectAssignment ──N Project
+            |       +──N Message (chat 1:1 con IA)
+            |       +──N StandupCheckin
+            |       +──N EstimationVote
+            |       +──N RetroFeedback
+            |       +──N TicketProposal (proposed/reviewed)
+            |
+            +──N Project
+            |       +──N TicketCache
+            |       +──N TicketProposal
+            |       +──N EstimationSession
+            |
+            +──N KnowledgeEntry
+            +──N DailyReport
+            +──N Retrospective
+            +──N IntegrationLog
+```
+
+### Roles y permisos
+
+#### Nivel 1: Organizacion (global)
+
+| Rol | Puede |
+|-----|-------|
+| **owner** | Todo. Billing, invitar/eliminar usuarios, crear equipos, configurar org |
+| **admin** | Crear equipos, gestionar miembros, configurar integraciones. No billing |
+| **member** | Usar la app: chat, proponer, votar, dar feedback |
+
+#### Nivel 2: Equipo (por equipo)
+
+| Rol | Puede |
+|-----|-------|
+| **lead** | Todo lo de member + aprobar propuestas, abrir estimaciones, abrir retros, gestionar proyecto |
+| **member** | Chat con la IA, proponer tickets, votar estimaciones, dar feedback retro, standup |
+
+**Nota**: `jobTitle` (ej: "Senior Backend Developer") es texto libre para dar contexto
+a la IA. No es un permiso. Le sirve para saber a quien preguntar sobre que.
+
+#### Permisos derivados (no tabla de permisos)
+
+```typescript
+// Los permisos se derivan del rol. Sin RBAC complejo.
+const canApproveProposals = (m: TeamMember) => m.teamRole === 'lead'
+const canOpenEstimation  = (m: TeamMember) => m.teamRole === 'lead'
+const canOpenRetro       = (m: TeamMember) => m.teamRole === 'lead'
+const canManageTeam      = (o: OrgMember)  => o.role === 'owner' || o.role === 'admin'
+const canManageBilling   = (o: OrgMember)  => o.role === 'owner'
+const canInviteUsers     = (o: OrgMember)  => o.role === 'owner' || o.role === 'admin'
+```
+
+### Modelos: Auth y Organizacion
+
+#### Organization
+```prisma
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique   // para URLs: dayless.ai/acme
+  plan      String   @default("free") // free, pro, enterprise
+  maxUsers  Int      @default(5)      // limite segun plan
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members   OrgMember[]
+  teams     Team[]
+
+  @@index([slug])
+}
+```
 
 #### User
 ```prisma
@@ -195,23 +386,48 @@ model User {
   avatar    String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-  memberships TeamMember[]
+
+  orgMemberships OrgMember[]
+
   @@index([email])
 }
 ```
 
+#### OrgMember
+```prisma
+model OrgMember {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String
+  role           String   @default("member") // owner, admin, member
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  teamMembers  TeamMember[]
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+}
+```
+
+### Modelos: Equipo y Proyecto
+
 #### Team
 ```prisma
 model Team {
-  id              String   @id @default(cuid())
-  name            String
-  description     String?
-  color           String   @default("#10b981")
-  storyPointGuide String?  // Markdown. La IA la usa al estimar.
-  sprintLengthDays Int     @default(14)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id               String   @id @default(cuid())
+  organizationId   String
+  name             String
+  description      String?
+  color            String   @default("#10b981")
+  storyPointGuide  String?  // Markdown. La IA la usa al estimar.
+  sprintLengthDays Int      @default(14)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   members        TeamMember[]
   projects       Project[]
   messages       Message[]
@@ -219,6 +435,8 @@ model Team {
   reports        DailyReport[]
   integrationLogs IntegrationLog[]
   retrospectives Retrospective[]
+
+  @@index([organizationId])
 }
 ```
 
@@ -227,20 +445,17 @@ model Team {
 model TeamMember {
   id               String   @id @default(cuid())
   teamId           String
-  userId           String?
+  orgMemberId      String   // Enlace con OrgMember (que enlaza con User)
   defaultProjectId String?
-  name             String
-  role             String   @default("Developer")
-  email            String?
-  avatar           String?
+  teamRole         String   @default("member") // lead, member
+  jobTitle         String   @default("Developer") // texto libre, contexto para la IA
   status           String   @default("active") // active, away, offline
-  canApproveTickets Boolean @default(false)     // NUEVO: solo estos crean en Jira
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
-  team             Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
-  user             User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
-  defaultProject   Project? @relation("MemberDefaultProject", fields: [defaultProjectId], references: [id], onDelete: SetNull)
+  team             Team      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  orgMember        OrgMember @relation(fields: [orgMemberId], references: [id], onDelete: Cascade)
+  defaultProject   Project?  @relation("MemberDefaultProject", fields: [defaultProjectId], references: [id], onDelete: SetNull)
   standups         StandupCheckin[]
   projectAssignments ProjectAssignment[]
   privateChatMessages Message[]
@@ -250,8 +465,9 @@ model TeamMember {
   retroFeedbacks   RetroFeedback[]
   requestedEstimations EstimationSession[] @relation("RequestedBy")
 
+  @@unique([teamId, orgMemberId]) // Un user solo puede estar una vez en un equipo
   @@index([teamId])
-  @@index([userId])
+  @@index([orgMemberId])
 }
 ```
 
@@ -268,19 +484,17 @@ model Project {
   jiraProjectKey  String?
   jiraBaseUrl     String?
   jiraToken       String?
-  jiraUserEmail   String?  // NUEVO: para Basic Auth de Jira Cloud
+  jiraUserEmail   String?
 
-  // -- Integracion Linear (alternativa) --
+  // -- Integracion Linear --
   linearTeamId    String?
   linearApiKey    String?
 
-  // -- Integracion GitHub (secundario) --
+  // -- Integracion GitHub --
   githubRepo      String?
   githubToken     String?
 
-  // -- Importacion manual --
-  // Si no hay integracion, se importan tickets via CSV/XML/JSON
-  // No requiere campos en el modelo
+  // Sin campos de integracion = modo manual (import o chat)
 
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -509,7 +723,7 @@ model EstimationSession {
   status              String   @default("open") // open, voting, discussing, closed, cancelled
   currentRound        Int      @default(1)
   finalEstimate       String?       // Se rellena al cerrar (ej: "8")
-  syncedToJira        Boolean  @default(false)  // Si ya se subio el estimate a Jira
+  syncedToTracker     Boolean  @default(false)  // Si ya se subio el estimate al tracker
   createdAt           DateTime @default(now())
   closedAt            DateTime?
   updatedAt           DateTime @updatedAt
@@ -588,10 +802,204 @@ model RetroFeedback {
 
 | Modelo | Razon |
 |--------|-------|
-| `Ticket` | Los tickets viven en Jira. Se reemplaza por `TicketCache` (lectura) + `TicketProposal` (creacion) |
-| `TicketWorkflow` | Los estados/workflows son de Jira |
-| `TicketTransition` | El historial de transiciones esta en Jira |
-| `TicketMessage` | Los comentarios de tickets van a Jira directamente |
+| `Ticket` | Los tickets viven en el tracker. Se reemplaza por `TicketCache` (lectura) + `TicketProposal` (creacion) |
+| `TicketWorkflow` | Los estados/workflows son del tracker |
+| `TicketTransition` | El historial de transiciones esta en el tracker |
+| `TicketMessage` | Los comentarios de tickets van al tracker directamente |
+
+### Flujo de usuario
+
+#### Registro (nuevo usuario, nueva organizacion)
+
+```
+1. Usuario accede a /register
+2. Introduce: nombre, email, password
+3. Backend crea:
+   a. User (email, password hash, name)
+   b. Organization (name pendiente, slug pendiente, plan: "free", maxUsers: 5)
+   c. OrgMember (userId, organizationId, role: "owner")
+4. Redirect a onboarding wizard (primera vez):
+   a. Paso 1: Nombre de la organizacion + slug (ej: "Acme Corp" → acme-corp)
+   b. Paso 2: Crear primer equipo (nombre, descripcion)
+   c. Paso 3: Invitar miembros (opcional, se puede saltar)
+   d. Se crea Team + TeamMember(teamRole: lead) para el owner
+5. Redirect a vista chat (la app esta lista)
+```
+
+#### Invitacion por email (link unico)
+
+```
+1. Owner/admin va a Teams > Gestionar equipo > Invitar miembro
+2. Introduce:
+   - Email del invitado
+   - Rol en el equipo: lead | member
+   - (Opcional) jobTitle para contexto de la IA
+3. Backend:
+   a. Valida que OrgMember.count < organization.maxUsers
+   b. Crea registro Invitation:
+      - organizationId, teamId, email, teamRole, token (uuid), status: "pending"
+      - expiresAt: now + 7 dias
+   c. Envia email al invitado con link: /invite/{token}
+4. El invitado hace click en el link:
+
+   Caso A — Ya tiene cuenta User en Dayless:
+   a. Se le pide login (email + password)
+   b. Backend crea OrgMember + TeamMember
+   c. Invitation.status = "accepted"
+   d. Redirect a la app (equipo ya visible)
+
+   Caso B — No tiene cuenta:
+   a. Formulario de registro pre-rellenado con el email
+   b. Introduce nombre + password
+   c. Backend crea User + OrgMember + TeamMember
+   d. Invitation.status = "accepted"
+   e. Redirect a la app
+
+   Caso C — Link expirado o revocado:
+   a. Muestra mensaje de error con opcion de pedir nueva invitacion
+
+5. Validaciones:
+   - No se puede invitar a alguien que ya es OrgMember de la misma org
+   - No se puede invitar si OrgMember.count >= maxUsers
+   - El token expira a los 7 dias
+   - Owner/admin puede revocar invitaciones pendientes
+```
+
+#### Login
+
+```
+1. User entra con email + password
+2. NextAuth valida credenciales, crea session
+3. Frontend:
+   a. Resuelve User.id → OrgMember → Organization
+   b. Carga TeamMember[] (todos los equipos del user en esta org)
+   c. Si tiene un solo equipo, lo selecciona automaticamente
+   d. Si tiene multiples, muestra selector de equipo
+4. Toda query se filtra por organizationId (tenant isolation)
+5. El currentMember (TeamMember activo) se guarda en Zustand
+```
+
+#### Billing (diferido)
+
+Solo los campos `plan` y `maxUsers` en Organization estan operativos. El control real:
+
+```
+- plan: "free" (5 usuarios), "pro" (25), "enterprise" (ilimitado)
+- Enforcement: al invitar o aceptar invitacion, si OrgMember.count >= maxUsers → error 403
+- Upgrade de plan: fase futura (Stripe, paginas de pricing, etc.)
+- No hay endpoints de billing en las 10 fases definidas
+```
+
+### Modelo Invitation
+
+```prisma
+model Invitation {
+  id             String   @id @default(cuid())
+  organizationId String
+  teamId         String
+  email          String
+  teamRole       String   @default("member") // lead, member
+  jobTitle       String?  // texto libre, se asigna al crear TeamMember
+  token          String   @unique
+  status         String   @default("pending") // pending, accepted, expired, revoked
+  invitedById    String   // OrgMember.id de quien invito
+  expiresAt      DateTime // default: now + 7 dias
+  acceptedAt     DateTime?
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([token])
+  @@index([email, organizationId])
+  @@index([organizationId, status])
+}
+```
+
+#### Endpoints de invitacion
+
+| Endpoint | Metodo | Descripcion |
+|----------|--------|-------------|
+| `POST /api/invitations` | POST | Crear invitacion (requiere orgRole owner\|admin). Envia email |
+| `GET /api/invitations?orgId=X&status=pending` | GET | Listar invitaciones (owner\|admin) |
+| `POST /api/invitations/:token/accept` | POST | Aceptar invitacion (el invitado, autenticado o registrandose) |
+| `DELETE /api/invitations/:id` | DELETE | Revocar invitacion pendiente (owner\|admin) |
+| `POST /api/invitations/:id/resend` | POST | Reenviar email con nuevo token y fecha expiracion |
+
+### Modelo Notification
+
+Notificaciones persistentes con estado leido/no leido. El frontend las muestra como badges en el sidebar y en un panel de notificaciones.
+
+```prisma
+model Notification {
+  id          String    @id @default(cuid())
+  memberId    String
+  teamId      String
+  type        String    // ver tabla de tipos abajo
+  title       String    // texto corto para badge/lista (max ~100 chars)
+  body        String?   // detalle en markdown (expandible)
+  metadata    String?   // JSON: { proposalId?, sessionId?, ticketKey?, projectId? }
+  isRead      Boolean   @default(false)
+  readAt      DateTime?
+  createdAt   DateTime  @default(now())
+
+  member TeamMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@index([memberId, isRead])
+  @@index([memberId, createdAt])
+  @@index([teamId])
+}
+```
+
+#### Tipos de notificacion
+
+| type | Cuando se crea | Destinatario |
+|------|---------------|-------------|
+| `estimation_pending` | Se abre sesion de estimacion | Cada miembro del proyecto |
+| `estimation_revealed` | Todos votaron, resultados visibles | Todos los que votaron |
+| `proposal_pending` | Nueva propuesta enviada a revision | Leads del equipo |
+| `proposal_approved` | Lead aprueba propuesta | Autor de la propuesta |
+| `proposal_rejected` | Lead rechaza propuesta | Autor de la propuesta |
+| `standup_reminder` | Hora de standup (configurable) y el miembro no ha enviado | Miembro sin standup |
+| `blocker_detected` | La IA detecta blocker cruzando chats | Lead + miembro afectado |
+| `risk_alert` | Ticket estancado, sprint overload, etc. | Lead del equipo |
+| `retro_open` | Se abre retrospectiva | Cada miembro del equipo |
+| `retro_closed` | Retro cerrada con acuerdos | Cada miembro del equipo |
+| `mention` | Otro miembro menciona a este en su standup/propuesta | Miembro mencionado |
+| `ticket_assigned` | Ticket asignado al miembro (desde propuesta aprobada o tracker sync) | Miembro asignado |
+
+#### Endpoints de notificaciones
+
+| Endpoint | Metodo | Descripcion |
+|----------|--------|-------------|
+| `GET /api/notifications?memberId=X&unreadOnly=true` | GET | Listar notificaciones (paginadas, filtro opcional) |
+| `GET /api/notifications/count?memberId=X` | GET | Solo el count de no leidas (para badge) |
+| `PATCH /api/notifications/:id/read` | PATCH | Marcar como leida |
+| `POST /api/notifications/read-all?memberId=X` | POST | Marcar todas como leidas |
+
+#### Creacion de notificaciones
+
+Las notificaciones se crean como efecto secundario de acciones:
+
+```typescript
+// src/lib/notifications.ts
+async function createNotification(params: {
+  memberId: string
+  teamId: string
+  type: NotificationType
+  title: string
+  body?: string
+  metadata?: Record<string, string>
+}): Promise<Notification> {
+  const notification = await db.notification.create({ data: params })
+  // Emitir evento SSE al miembro
+  emitToMember(params.memberId, 'notification', {
+    id: notification.id,
+    type: notification.type,
+    title: notification.title,
+  })
+  return notification
+}
+```
 
 ---
 
@@ -660,40 +1068,11 @@ Auth: Basic base64(email:apiToken)
 - `fields.sprint.name` -> `sprint`
 - URL: `${jiraBaseUrl}/browse/${key}` -> `externalUrl`
 
-#### 2. Linear Adapter (full sync)
+#### 2. Linear Adapter (full sync) — FASE FUTURA
 
-```
-Configuracion: linearTeamId + linearApiKey
-Capabilities: read ✓ | write ✓ | sync ✓ | sprints ✓ (cycles) | estimates ✓ | comments ✓
-Auth: Bearer token
-```
+> **Nota**: el adapter de Linear se implementara en una fase posterior. El MVP cubre Jira Cloud + GitHub Issues + Manual. La interfaz `TicketSourceAdapter` esta disenada para anadir Linear sin cambios en el resto del sistema.
 
-API GraphQL:
-```graphql
-# Leer tickets del ciclo activo
-query { team(id: "ID") { activeCycle { issues { nodes {
-  identifier, title, description, state { name }, priority, estimate,
-  assignee { name, email }, labels { nodes { name } }, url
-} } } } }
-
-# Crear issue
-mutation { issueCreate(input: { teamId, title, description, priority, estimate }) {
-  issue { identifier, url }
-} }
-
-# Actualizar issue
-mutation { issueUpdate(id: "ID", input: { description, estimate }) {
-  issue { identifier }
-} }
-```
-
-**Mapeo a TicketCache:**
-- `identifier` -> `externalKey` (ej: PAY-45)
-- `state.name` -> `status`
-- `priority` -> 0=none, 1=urgent, 2=high, 3=medium, 4=low -> normalizar
-- `estimate` -> `estimate` (Linear usa numeros directamente)
-- `activeCycle.name` -> `sprint`
-- `url` -> `externalUrl`
+Configuracion prevista: `linearTeamId + linearApiKey`. API GraphQL. Full sync bidireccional (read + write + cycles + estimates + comments). Mapeo a TicketCache similar a Jira.
 
 #### 3. GitHub Issues Adapter (read + limited write)
 
@@ -807,9 +1186,33 @@ PROJ-2,Fix bug pagos,Error en checkout,In Progress,Critical,carlos@team.com,3
 ]
 ```
 
-**Trello JSON export**: parsear `cards` -> `name` (title), `desc` (description), `idList` -> nombre de lista (status), `labels` (priority/tags)
+**Trello JSON export** *(fase futura)*: parsear `cards` -> `name`, `desc`, `idList` -> status, `labels`
 
-**Asana CSV export**: parsear columnas estandar de Asana (Name, Section, Assignee, Due Date, etc.)
+**Asana CSV export** *(fase futura)*: parsear columnas estandar de Asana (Name, Section, Assignee, Due Date)
+
+#### Deteccion automatica de formato
+
+El backend detecta el formato automaticamente por extension y/o contenido:
+- `.csv` → parser CSV
+- `.json` → si contiene array de objetos con `key`/`title` → JSON generico. Si contiene `cards` → Trello (futuro)
+- `.xml` → si contiene `<rss>` o `<channel>` → Jira XML export
+
+Si no se puede detectar, el usuario puede indicar el formato explicitamente en el formulario de importacion.
+
+#### Mapeo de campos por formato
+
+| Campo TicketCache | CSV (columna) | JSON (campo) | XML Jira (tag) |
+|-------------------|---------------|-------------|----------------|
+| externalKey | `key` | `key` | `<key>` |
+| title | `title` | `title` | `<summary>` |
+| description | `description` | `description` | `<description>` |
+| status | `status` | `status` | `<status>` |
+| priority | `priority` | `priority` | `<priority>` |
+| assigneeEmail | `assignee` | `assignee` | `<assignee>` |
+| estimate | `estimate` | `estimate` | `<customfield_10016>` |
+| issueType | `type` (opcional) | `type` (opcional) | `<type>` |
+
+Campos no presentes en el archivo se dejan como null. El campo `externalKey` se genera automaticamente (`IMP-001`, `IMP-002`...) si no viene en los datos.
 
 #### Flujo de importacion
 
@@ -857,12 +1260,12 @@ INVALIDACION:
 | Integracion | Lectura | Escritura | Sprints | Estimates | Prioridad |
 |------------|---------|-----------|---------|-----------|-----------|
 | **Jira Cloud** | Sync sprint completo | Crear, actualizar, comentar | Si (nativo) | Si (story points) | P0 |
-| **Linear** | Sync cycle completo | Crear, actualizar, comentar | Si (cycles) | Si (nativo) | P1 |
-| **GitHub Issues** | Sync open issues | Crear, comentar, labels | Parcial (milestones) | Parcial (labels) | P2 |
-| **Manual (sin tracker)** | N/A | Solo local | No | Si (local) | P0 |
-| **CSV/XML/JSON import** | Importacion unica | No (solo lectura) | No | Si (si viene en datos) | P1 |
-| **Trello export** | Via JSON export | No | Parcial (listas) | No | P3 |
-| **Asana export** | Via CSV export | No | Parcial (sections) | No | P3 |
+| **GitHub Issues** | Sync open issues | Crear, comentar, labels | Parcial (milestones) | Parcial (labels) | P1 |
+| **Manual (sin tracker)** | N/A | Solo local (board interactivo) | Opcional (sprints manuales) | Si (local + IA) | P0 |
+| **CSV/JSON/XML import** | Importacion unica | No (solo lectura) | No | Si (si viene en datos) | P1 |
+| **Linear** *(futuro)* | Sync cycle completo | Crear, actualizar, comentar | Si (cycles) | Si (nativo) | Futuro |
+| **Trello export** *(futuro)* | Via JSON export | No | Parcial (listas) | No | Futuro |
+| **Asana export** *(futuro)* | Via CSV export | No | Parcial (sections) | No | Futuro |
 
 ### Que pasa cuando NO hay integracion
 
@@ -878,6 +1281,110 @@ Dayless funciona perfectamente sin tracker externo. La diferencia:
 | La IA dice "actualizado en Jira" | La IA dice "actualizado en el tablero" |
 
 El equipo puede empezar sin nada y conectar un tracker cuando quiera. Los datos de TicketCache se mantienen y se enlazan con el tracker al configurar la integracion.
+
+### Modo manual: estados, board interactivo y sprints opcionales
+
+Cuando un proyecto NO tiene tracker externo (ni Jira, ni Linear, ni GitHub configurados), los tickets viven exclusivamente en `TicketCache` con `source: "manual"` o `source: "proposal"`. Este modo necesita responder a: como se gestionan los estados, como se visualizan, y como se mueven.
+
+#### Estados en modo manual
+
+`TicketCache.status` es un string libre, pero en modo manual se necesita un workflow definido para renderizar columnas en el board. Se anade un campo al modelo `Project`:
+
+```prisma
+// En Project:
+manualWorkflow String? // JSON array de nombres de estado, ej: '["Backlog","To Do","In Progress","Review","Done"]'
+```
+
+- **Default**: `["Backlog","To Do","In Progress","Review","Done"]`
+- **Personalizable**: el lead puede editar el workflow en la configuracion del proyecto (anadir, quitar, reordenar estados)
+- **Sin tracker**: el board usa `manualWorkflow` para las columnas
+- **Con tracker**: `manualWorkflow` se ignora, las columnas vienen del tracker (estados de Jira, Linear, etc.)
+
+#### Board interactivo (vista `board`)
+
+La vista `board` (antes llamada `jira-board` en versiones anteriores del design) muestra tickets en columnas segun su estado. Funciona para **todos los modos**:
+
+| Modo | Fuente de columnas | Fuente de tickets | Interactivo? |
+|------|--------------------|-------------------|-------------|
+| Jira/Linear sync | Estados del tracker | TicketCache (synced) | Solo lectura (mover en el tracker) |
+| GitHub Issues | open / closed | TicketCache (synced) | Solo lectura |
+| Manual / Import | `project.manualWorkflow` | TicketCache (local) | **Drag & drop** |
+| Sin tickets | `project.manualWorkflow` | Vacio | Drag & drop (cuando lleguen propuestas) |
+
+#### Dos formas de cambiar estado (modo manual)
+
+En modo manual, el estado de un ticket se puede cambiar de **dos maneras equivalentes**:
+
+**1. Drag & drop en el board:**
+```
+Usuario arrastra ticket de "In Progress" a "Review"
+→ Frontend: PATCH /api/tickets/cache/:id { status: "Review" }
+→ TicketCache.status = "Review"
+→ SSE: ticket_update al equipo
+```
+
+**2. Chat con la IA:**
+```
+Dev: "Ya termine PAY-123"
+IA detecta intencion de cambio de estado
+→ Backend: PATCH /api/tickets/cache/:id { status: "Done" }
+→ IA responde: "PAY-123 movido a Done ✓"
+→ SSE: ticket_update al equipo
+```
+
+Ambos caminos actualizan el mismo `TicketCache.status` y emiten el mismo evento SSE.
+
+#### Endpoints de TicketCache (modo manual)
+
+| Endpoint | Metodo | Descripcion |
+|----------|--------|-------------|
+| `PATCH /api/tickets/cache/:id` | PATCH | Actualizar status, estimate, assignee, etc. En modo manual: directo. Con tracker: via adapter si soporta write |
+| `GET /api/tickets/cache?projectId=X&sprint=Y` | GET | Listar tickets (filtrar por proyecto, sprint, status, assignee) |
+
+#### Sprints opcionales en modo manual
+
+El equipo puede trabajar en modo kanban puro (sin sprints) o activar sprints manuales:
+
+```prisma
+// En Project:
+sprintMode     String  @default("none") // "none" | "manual"
+```
+
+- **`none`** (kanban): no hay sprints. `TicketCache.sprint` es null. El board muestra todos los tickets.
+- **`manual`**: el lead define sprints con nombre y fechas.
+
+```prisma
+model Sprint {
+  id          String    @id @default(cuid())
+  projectId   String
+  name        String    // "Sprint 1", "Semana 14", etc.
+  startDate   String    // YYYY-MM-DD
+  endDate     String    // YYYY-MM-DD
+  status      String    @default("active") // planned, active, completed
+  goal        String?   // objetivo del sprint (texto libre)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, status])
+}
+```
+
+- `TicketCache.sprint` referencia `Sprint.name` para filtrar
+- El board muestra un selector de sprint como filtro
+- La IA usa el sprint activo para calcular velocity y proyecciones
+
+**Endpoints de sprints:**
+
+| Endpoint | Metodo | Descripcion |
+|----------|--------|-------------|
+| `POST /api/projects/:id/sprints` | POST | Crear sprint (solo lead) |
+| `GET /api/projects/:id/sprints` | GET | Listar sprints del proyecto |
+| `PATCH /api/projects/:id/sprints/:sprintId` | PATCH | Actualizar sprint (cerrar, cambiar fechas) |
+| `POST /api/projects/:id/sprints/:sprintId/assign` | POST | Asignar tickets al sprint |
+
+**Cuando el proyecto tiene tracker con sprints nativos** (Jira, Linear), `sprintMode` se ignora: los sprints vienen del tracker via sync y se reflejan en `TicketCache.sprint` automaticamente.
 
 ---
 
@@ -928,11 +1435,13 @@ REGLAS DE COMPORTAMIENTO:
 
 ```
 EQUIPO: {team.name}
-MIEMBROS:
-- Ana Garcia (Tech Lead) - activa - puede aprobar tickets
-- Carlos Lopez (Developer) - activo
-- Luis Martinez (Developer) - activo
-- Maria Ruiz (Product Manager) - activa - puede aprobar tickets
+ORGANIZACION: {organization.name}
+
+MIEMBROS DEL EQUIPO:
+- Ana Garcia (Tech Lead) [lead] - activa - puede aprobar propuestas, abrir estimaciones/retros
+- Carlos Lopez (Senior Backend Developer) [member] - activo
+- Luis Martinez (Frontend Developer) [member] - activo
+- Maria Ruiz (Product Manager) [lead] - activa - puede aprobar propuestas, abrir estimaciones/retros
 
 PROYECTO ACTUAL (este chat): {project.name}
 SPRINT ACTUAL: Sprint 14 (2026-03-18 al 2026-04-01)
@@ -1110,52 +1619,157 @@ NUNCA afirmes que un ticket ha sido creado hasta que el sistema lo confirme.
 | 1.6 | Confirmacion de acciones UI | Mostrar propuestas/acciones con botones de confirmar/rechazar en el chat |
 | 1.7 | Eliminar logica de tickets internos | Quitar todo el codigo de `INTERNAL_TICKET_ACTION`, `executeInternalTicketCreate`, fallbacks, etc. |
 
-### Prompt completo para la tarea 1.2: Contexto cross-member
+### Tarea 1.2: Contexto cross-member (especificacion concreta)
 
-El contexto cross-member es la pieza clave que convierte a la IA en un coordinador real. Se construye asi:
+El contexto cross-member es la pieza clave que convierte a la IA en un coordinador real. Se construye **exclusivamente a partir de datos estructurados** (sin segunda llamada al LLM). Esto es determinista, barato y respeta la privacidad: no se comparte contenido de chats privados, solo datos que el miembro proporciono explicitamente (standup, tickets, knowledge).
+
+#### Principio: solo decisiones relevantes al usuario actual
+
+La IA NO recibe un volcado de todo lo que hacen los demas. Recibe **solo lo que incumbe al miembro actual**: blockers que le afectan, tickets relacionados con los suyos, decisiones que impactan su trabajo.
+
+#### Fuentes de datos
+
+| Fuente | Que se extrae | Filtro de relevancia |
+|--------|---------------|---------------------|
+| `StandupCheckin` | Ultimo checkin de cada miembro (ultimas 48h) | Solo miembros del mismo proyecto |
+| `TicketCache` | Tickets asignados a otros miembros | Solo tickets del mismo proyecto/sprint |
+| `KnowledgeEntry` | Blockers activos (category: "blocker") | Solo los no resueltos, del equipo |
+| `KnowledgeEntry` | Decisiones recientes (category: "decision") | Ultimas 48h, que afecten al proyecto actual |
+
+#### Implementacion
 
 ```typescript
+// src/lib/cross-member-context.ts
 async function buildCrossMemberContext(
   teamId: string,
   projectId: string,
   currentMemberId: string
 ): Promise<string> {
-  // 1. Obtener los ultimos mensajes de CADA miembro (no el actual)
-  //    Solo los ultimos 5 mensajes de cada uno, de las ultimas 48h
+  const otherMembers = await getProjectMembers(projectId, excluding: currentMemberId)
 
-  // 2. Para cada miembro, extraer:
-  //    - Ultimo update de trabajo (que esta haciendo)
-  //    - Blockers activos mencionados
-  //    - Dependencias con otros (menciones de tickets, APIs, etc.)
-  //    - Mood/sentimiento general (inferido del tono)
+  const sections: string[] = []
 
-  // 3. Llamar al LLM con un prompt de resumen:
+  for (const member of otherMembers) {
+    const lines: string[] = []
 
-  const summaryPrompt = `
-    Analiza estos mensajes recientes del equipo y genera un resumen
-    conciso para dar contexto a otro miembro. NO incluyas la conversacion
-    literal, solo los datos relevantes:
+    // 1. Ultimo standup (ultimas 48h)
+    const standup = await getLatestStandup(member.id, hoursAgo: 48)
+    if (standup) {
+      lines.push(`  Ayer: ${standup.yesterdayWork || '—'}`)
+      lines.push(`  Hoy: ${standup.todayPlan || '—'}`)
+      if (standup.blockers) lines.push(`  ⚠️ Blocker: ${standup.blockers}`)
+    }
 
-    Para cada miembro incluye (si hay info):
-    - En que esta trabajando
-    - Blockers reportados
-    - Dependencias con otros miembros o tickets
-    - Tiempo estimado si lo menciono
+    // 2. Tickets asignados en el proyecto (de TicketCache)
+    const tickets = await getAssignedTickets(member, projectId)
+    if (tickets.length > 0) {
+      lines.push(`  Tickets: ${tickets.map(t =>
+        `${t.externalKey} "${t.title}" [${t.status}]`
+      ).join(', ')}`)
+    }
 
-    NO incluyas: opiniones personales, quejas no-constructivas,
-    contexto irrelevante al proyecto.
+    if (lines.length > 0) {
+      sections.push(`- **${member.jobTitle || member.teamRole}** (${member.teamRole}):\n${lines.join('\n')}`)
+    }
+  }
 
-    Mensajes:
-    ${memberMessages}
-  `
+  // 3. Blockers activos del equipo
+  const blockers = await getActiveBlockers(teamId)
+  // 4. Decisiones recientes relevantes
+  const decisions = await getRecentDecisions(teamId, hoursAgo: 48)
 
-  // 4. Cachear el resumen 30 minutos para no llamar al LLM en cada mensaje
-
-  return summary
+  return formatContext(sections, blockers, decisions)
 }
 ```
 
-**Alternativa sin doble llamada al LLM**: En vez de llamar al LLM para resumir, se pueden extraer los datos estructuradamente de los mensajes (ultimo standup checkin, blockers en knowledge base, ticket assignments del TicketCache). Es menos preciso pero mas rapido y barato.
+#### Formato inyectado en el prompt (Bloque 5)
+
+```
+CONTEXTO DE OTROS MIEMBROS (datos reales, NO chats privados):
+
+- Ana Garcia (Tech Lead) [lead]:
+  Ayer: Reviso PRs de Luis
+  Hoy: Empieza PAY-123 (login)
+  Tickets: PAY-123 "Mejorar login" [To Do]
+
+- Carlos Lopez (Senior Backend) [member]:
+  Ayer: Sigue con PAY-124
+  ⚠️ Blocker: permisos pasarela de pagos (3 dias)
+  Tickets: PAY-124 "Fix bug checkout" [In Progress]
+
+BLOCKERS ACTIVOS DEL EQUIPO:
+- Carlos: permisos pasarela de pagos (3 dias, sin resolver)
+
+DECISIONES RECIENTES (ultimas 48h):
+- Rate limiting en login: 5 intentos, bloqueo 15 min (ayer)
+```
+
+**No se cachea**: la query es rapida (4-5 queries a SQLite) y los datos cambian con cada standup/update. Si en produccion con PostgreSQL se necesita cache, se puede anadir TTL de 5-10 minutos.
+
+### Mensajes proactivos de la IA
+
+La IA necesita poder enviar mensajes al chat de un miembro **sin que este haya escrito**. Esto ocurre cuando:
+
+- Se abre una sesion de estimacion y la IA pide el voto
+- Se aprueba/rechaza una propuesta y la IA notifica al autor
+- Se abre una retrospectiva y la IA pide feedback
+- Se detecta un blocker cruzado
+- Es hora de standup y el miembro no ha enviado
+
+#### Mecanismo
+
+Los mensajes proactivos se crean como `Message` con `senderType: "system"` en el hilo del miembro + proyecto:
+
+```typescript
+// src/lib/proactive-messages.ts
+async function sendProactiveMessage(params: {
+  teamId: string
+  ownerMemberId: string
+  projectId: string
+  content: string        // markdown
+  metadata?: string      // JSON: { type, relatedId }
+}): Promise<Message> {
+  const message = await db.message.create({
+    data: {
+      ...params,
+      senderId: null,
+      senderName: 'Dayless',
+      senderType: 'system',
+    }
+  })
+  // Emitir SSE para que el frontend lo muestre en tiempo real
+  emitToMember(params.ownerMemberId, 'message', {
+    id: message.id,
+    projectId: params.projectId,
+    senderType: 'system',
+    preview: params.content.slice(0, 100),
+  })
+  // Crear Notification asociada
+  await createNotification({
+    memberId: params.ownerMemberId,
+    teamId: params.teamId,
+    type: inferNotificationType(params.metadata),
+    title: params.content.slice(0, 100),
+    metadata: params.metadata,
+  })
+  return message
+}
+```
+
+#### Visualizacion
+
+- Los mensajes system aparecen en el chat como burbujas diferenciadas (color/icono distinto)
+- El sidebar muestra un badge con mensajes no leidos por proyecto
+- Al abrir el chat, los mensajes system se marcan como leidos
+- La IA, en su siguiente respuesta al usuario, tambien tiene contexto de que hay mensajes pendientes (inyectado en el prompt):
+
+```
+MENSAJES PENDIENTES PARA ESTE MIEMBRO (no leidos):
+- [system] Hay una estimacion abierta para PAY-123. ¿Tu voto? (hace 2h)
+- [system] Tu propuesta "Cache API pagos" fue aprobada. PAY-130 ✓ (hace 1h)
+
+Menciona estos mensajes si el usuario no los ha visto aun.
+```
 
 ---
 
@@ -1347,7 +1961,7 @@ propone consolidar y subir a Jira.
 
 ### Objetivo
 
-Cualquier miembro puede proponer un ticket desde el chat. La propuesta entra en cola de revision. Solo miembros con `canApproveTickets = true` pueden aprobar/rechazar. Al aprobar, se crea automaticamente en Jira.
+Cualquier miembro puede proponer un ticket desde el chat. La propuesta entra en cola de revision. Solo miembros con `teamRole = 'lead'` pueden aprobar/rechazar. Al aprobar, se crea automaticamente en Jira.
 
 ### Flujo funcional
 
@@ -1441,7 +2055,7 @@ IA: Tu propuesta "Implementar cache en API de pagos" fue
 | `GET /api/proposals?teamId=X&status=pending_review` | GET | Lista propuestas (filtrar por status, project, member) |
 | `POST /api/proposals` | POST | Crear propuesta (desde chat o vista) |
 | `PUT /api/proposals/:id` | PUT | Actualizar propuesta (editar antes de aprobar) |
-| `POST /api/proposals/:id/approve` | POST | Aprobar propuesta (crea en tracker via adapter si disponible, o en TicketCache local. Solo `canApproveTickets`) |
+| `POST /api/proposals/:id/approve` | POST | Aprobar propuesta (crea en tracker via adapter si disponible, o en TicketCache local. Solo leads) |
 | `POST /api/proposals/:id/reject` | POST | Rechazar con motivo |
 
 ### Tareas de implementacion - Fase 3
@@ -1457,7 +2071,7 @@ IA: Tu propuesta "Implementar cache en API de pagos" fue
 | 3.7 | Notificacion a lead | Cuando se crea propuesta, la IA lo menciona en el proximo mensaje al lead |
 | 3.8 | Notificacion al autor | Cuando se aprueba/rechaza, la IA lo menciona en el proximo mensaje al autor |
 | 3.9 | Vista Proposals | UI de cola de propuestas con filtros y acciones |
-| 3.10 | Validacion canApproveTickets | Middleware que verifica permisos en endpoints de aprobacion |
+| 3.10 | Validacion de permisos lead | Middleware que verifica `teamRole === 'lead'` en endpoints de aprobacion |
 
 ### Prompt inyectado cuando hay propuestas pendientes
 
@@ -1491,20 +2105,62 @@ TUS PROPUESTAS:
 
 ### Objetivo
 
-Estimacion tipo Planning Poker pero asincrona. El lead abre una sesion de estimacion para un ticket. La IA pide a cada dev que vote en su chat privado. Los votos son ocultos hasta que todos votan. Si hay divergencia, la IA facilita la discusion y abre otra ronda. El resultado se sube a Jira.
+Estimacion con dos caminos: la IA siempre sugiere primero (rapido, orientativo) y el lead puede escalar a Planning Poker asincrono si quiere consenso del equipo. Ambos caminos terminan actualizando el TicketCache (y el tracker via adapter si esta disponible).
 
-### Flujo funcional
+### Modelo hibrido: IA primero, Poker si se necesita
+
+```
+Cualquier miembro pregunta por estimacion (chat o /estimar TICKET-KEY)
+  │
+  ├─ Paso 1: La IA SIEMPRE sugiere primero
+  │   - Compara con tickets similares del proyecto (TicketCache con estimate)
+  │   - Aplica story point guide del equipo
+  │   - Analiza AC y complejidad
+  │   - Presenta: "Sugiero X story points porque [razon]. [Comparables: ...]"
+  │
+  ├─ Paso 2a: Aceptar sugerencia (camino rapido)
+  │   - Miembro: "Ok, ponle 5"
+  │   - IA actualiza TicketCache.estimate (y tracker si hay)
+  │   - Hecho. Sin sesion de Poker.
+  │
+  └─ Paso 2b: Abrir Planning Poker (camino completo, solo leads)
+      - Lead: "Abre votacion al equipo"
+      - Se crea EstimationSession
+      - Flujo de Poker asincrono (ver abajo)
+```
+
+#### Prompt de estimacion IA (inyectado cuando se pide estimar)
+
+```
+Cuando te pidan estimar un ticket, SIEMPRE:
+1. Sugiere tu estimacion basandote en:
+   - La guia de story points del equipo (si existe)
+   - Tickets comparables del mismo proyecto que ya tienen estimacion
+   - Complejidad de los criterios de aceptacion
+   - Incertidumbre tecnica inferida de la descripcion
+2. Presenta la sugerencia como orientacion, NO como decision final:
+   "Sugiero **X story points** basandome en [razon].
+    Tickets similares: [KEY] (Y pts), [KEY] (Z pts).
+    ¿Te parece bien o prefieres abrir votacion al equipo?"
+3. Si el miembro acepta, actualiza la estimacion directamente
+4. Si es lead y pide votacion, abre sesion de Planning Poker
+5. NUNCA estimes sin dar contexto de por que elegiste ese numero
+```
+
+### Flujo funcional del Planning Poker (camino completo)
 
 ```
 Fase A: Apertura (lead)
   Lead dice "/estimar PAY-123" o la IA sugiere estimar tras refinamiento.
-  Se crea EstimationSession con status "voting".
+  La IA da su sugerencia primero (siempre).
+  Si el lead pide votacion del equipo: se crea EstimationSession con status "voting".
 
 Fase B: Votacion (cada dev, asincrono)
-  La IA pregunta a cada dev en su chat privado.
-  Da contexto: titulo, AC, tickets similares, story point guide.
+  La IA envia mensaje proactivo a cada dev en su chat privado (senderType: "system").
+  Da contexto: titulo, AC, tickets similares, story point guide, sugerencia de la IA.
   Dev vota con Fibonacci (1,2,3,5,8,13,21) o "?" si no sabe.
   Votos ocultos hasta que todos votan.
+  Se crea Notification (type: "estimation_pending") para cada dev.
 
 Fase C: Revelacion
   Cuando todos han votado, la IA revela los resultados.
@@ -1513,10 +2169,12 @@ Fase C: Revelacion
   Si hay divergencia:
     → La IA facilita discusion, explica las razones.
     → Abre nueva ronda.
+  Se emite SSE "estimation_update" a todos los participantes.
 
 Fase D: Cierre
   Consenso alcanzado o lead decide valor final.
-  Se sube a Jira como story points.
+  Se actualiza TicketCache.estimate (y tracker via adapter si soporta write).
+  Se crea Notification (type: "estimation_revealed") para todos.
 ```
 
 ### Ejemplo completo
@@ -2357,12 +3015,12 @@ Formato JSON (al final del mensaje):
 | Vista | Proposito | Prioridad | Quien la ve |
 |-------|-----------|-----------|-------------|
 | **chat** | Chat 1:1 con la IA. Core de la app. | P0 | Todos |
-| **proposals** | Cola de propuestas de tickets pendientes de aprobacion | P0 | Solo leads (`canApproveTickets`) para aprobar; todos para ver estado de sus propuestas |
+| **proposals** | Cola de propuestas de tickets pendientes de aprobacion | P0 | Solo leads para aprobar; todos para ver estado de sus propuestas |
 | **standup** | Resumen diario del equipo generado por la IA | P0 | Todos |
-| **jira-board** | Vista de lectura de tickets del sprint actual desde Jira | P1 | Todos |
+| **board** | Tablero de tickets por estado. Lectura (tracker sync) o interactivo drag & drop (manual). Todos los modos | P1 | Todos |
 | **knowledge** | Decisiones, acuerdos y contexto del equipo | P1 | Todos |
 | **teams** | Gestion de equipos y miembros | P2 | Leads |
-| **projects** | Configuracion de proyectos, conexion Jira/Linear, importacion | P2 | Leads |
+| **projects** | Configuracion de proyectos, conexion Jira/GitHub, importacion CSV/JSON/XML | P2 | Leads |
 | **settings** | Ajustes: story point guide, sprint length, integraciones | P2 | Leads |
 | **profile** | Perfil del usuario, avatar, notificaciones | P3 | Todos |
 
@@ -2371,8 +3029,8 @@ Formato JSON (al final del mensaje):
 | Vista eliminada | Razon | Reemplazo |
 |----------------|-------|-----------|
 | `dashboard` | No aporta valor, datos mock | El chat es el punto de entrada |
-| `kanban` | Duplica Jira. Los tickets estan en Jira | `jira-board` (solo lectura) |
-| `tickets` | Gestion de tickets es de Jira | `jira-board` + `proposals` |
+| `kanban` | Duplica Jira. Los tickets estan en Jira | `board` (lectura o interactivo segun modo) |
+| `tickets` | Gestion de tickets es de Jira | `board` + `proposals` |
 | `reports` | Reportes manuales sin valor | `standup` automatico + `/resumen-semanal` |
 
 ### Wireframe funcional del chat (vista principal)
@@ -2455,68 +3113,100 @@ Usa la secuencia Fibonacci: 1, 2, 3, 5, 8, 13, 21
 
 ## Apendice B: Secuencia de migracion desde la app actual {#apendice-b}
 
-### Paso 1: Schema (semana 1)
+### Paso 0: Infraestructura base (semana 0-1)
 
-1. Anadir modelos nuevos: `TicketCache`, `TicketProposal`, `EstimationSession`, `EstimationVote`, `Retrospective`, `RetroFeedback`
-2. Anadir `canApproveTickets` a `TeamMember`
-3. Anadir `sprintLengthDays` a `Team`
-4. Anadir campos nuevos a `Project` (Linear, jiraUserEmail)
-5. Anadir `source` y `projectId` a `StandupCheckin`
-6. Anadir `projectId` a `DailyReport`
-7. Anadir `expiresAt` a `KnowledgeEntry`
-8. Run `bun run db:push`
-9. NO eliminar modelos viejos aun (Ticket, TicketWorkflow, etc.)
+> Este paso es prerequisito de todo lo demas. Establece auth, multi-tenant y las bases de comunicacion.
+
+1. **Auth middleware global** (`src/middleware.ts` + `src/lib/auth-context.ts`):
+   - `resolveAuthContext()` que resuelve session → User → OrgMember → TeamMember[]
+   - Helpers de permisos: `requireTeamRole()`, `requireOrgRole()`, `requireTeamAccess()`
+   - Aplicar a todas las `/api/` routes existentes (excepto auth/register)
+2. **Modelos Organization + OrgMember + Invitation**:
+   - Crear los 3 modelos en Prisma
+   - Migrar datos: crear Organization por defecto ("Default Org"), OrgMember para cada User existente
+   - Anadir `organizationId` a `Team`
+3. **Refactorizar TeamMember**:
+   - Quitar `name`, `email`, `avatar` (vienen de User via OrgMember)
+   - Anadir `teamRole` (lead/member), `jobTitle`, `orgMemberId`
+   - Migrar datos: inferir `teamRole` de `canApproveTickets` o poner "member" por defecto
+4. **Flujos de registro e invitacion**:
+   - Refactorizar `/api/register` para crear User + Organization + OrgMember
+   - Crear endpoints de invitacion (POST /api/invitations, accept, revoke)
+   - Onboarding wizard (nombre org, primer equipo)
+5. **Modelo Notification + SSE stream**:
+   - Crear modelo `Notification` en Prisma
+   - Endpoints CRUD de notificaciones (GET, read, read-all, count)
+   - Endpoint SSE `GET /api/events/stream` con mapa de conexiones
+   - Frontend: `EventSource` en AppShell, badges en sidebar
+6. Run `bun run db:push`
+7. NO eliminar modelos viejos aun (Ticket, TicketWorkflow, etc.)
+
+### Paso 1: Schema nuevos modelos (semana 1-2)
+
+1. Anadir modelos nuevos: `TicketCache`, `TicketProposal`, `EstimationSession`, `EstimationVote`, `Retrospective`, `RetroFeedback`, `Sprint`
+2. Anadir campos a `Project`: `manualWorkflow`, `sprintMode`, campos Linear (futuro: `linearTeamId`, `linearApiKey`), `jiraUserEmail`
+3. Anadir campos a `StandupCheckin`: `source`, `projectId`
+4. Anadir `projectId` a `DailyReport`
+5. Anadir `expiresAt` a `KnowledgeEntry`
+6. Run `bun run db:push`
 
 ### Paso 2: Chat core refactor (semana 2-3)
 
-1. Reescribir system prompt con estructura de 7 bloques
-2. Implementar build de contexto cross-member
-3. Implementar parseo de acciones JSON (ticket_proposal, knowledge_entry, ticket_update, standup_checkin)
-4. Eliminar logica de tickets internos (INTERNAL_TICKET_ACTION, fallbacks, etc.)
-5. Implementar quick actions nuevos
-6. Tests manuales exhaustivos del chat
+1. Reescribir system prompt con estructura de 7 bloques (ver Fase 1)
+2. Implementar `buildCrossMemberContext()` con datos estructurados (standups + tickets + blockers)
+3. Implementar `sendProactiveMessage()` para mensajes system en chat
+4. Implementar parseo de acciones JSON (ticket_proposal, knowledge_entry, ticket_update, standup_checkin)
+5. Eliminar logica de tickets internos (INTERNAL_TICKET_ACTION, executeInternalTicketCreate, fallbacks)
+6. Implementar quick actions nuevos (/standup, /refinar, /proponer, /mis-tickets, /blockers, /decisiones, /estimar, /retro)
+7. Tests manuales exhaustivos del chat
 
 ### Paso 3: Adapter layer + sync (semana 3-4)
 
-1. Implementar `src/lib/ticket-source.ts` con interfaz comun
-2. Adapter Manual (siempre disponible): CRUD local sobre TicketCache
+1. Implementar `src/lib/ticket-source.ts` con interfaz `TicketSourceAdapter`
+2. Adapter Manual (siempre disponible): CRUD local sobre TicketCache + board interactivo
 3. Adapter Jira: sync sprint, detalle, update, create, comment
-4. Adapter Linear: sync cycle, detalle, update, create, comment
-5. Adapter GitHub Issues: sync open issues, create, comment
-6. Importacion CSV/XML/JSON (carga directa en TicketCache)
-7. Importacion desde chat (la IA parsea listas de tickets pegadas)
+4. Adapter GitHub Issues: sync open issues, create, comment
+5. Importacion CSV/JSON/XML (carga directa en TicketCache con deteccion de formato)
+6. Importacion desde chat (la IA parsea listas de tickets pegadas)
+7. *(Linear adapter: fase futura)*
 
 ### Paso 4: Propuestas y estimacion (semana 4-5)
 
 1. CRUD de TicketProposal
-2. Flujo de aprobacion/rechazo
-3. Vista Proposals
-4. EstimationSession + EstimationVote
-5. Flujo de votacion asincrona en chat
-6. Logica de consenso y nueva ronda
+2. Flujo de aprobacion/rechazo (validacion de permisos lead via `requireTeamRole`)
+3. Vista Proposals (UI de cola con filtros y acciones)
+4. Notificaciones de propuestas (SSE + Notification model)
+5. Estimacion hibrida: IA sugiere primero + Planning Poker opcional
+6. EstimationSession + EstimationVote + flujo de votacion asincrona
+7. Logica de consenso, nueva ronda, cierre
+8. Mensajes proactivos a devs pidiendo voto (via `sendProactiveMessage`)
 
 ### Paso 5: Standup y vistas (semana 5-6)
 
-1. Standup automatico desde chat
-2. Generacion de DailyReport
-3. Vista Standup refactorizada
-4. Vista jira-board (lectura de TicketCache)
+1. Standup automatico desde chat (extraccion IA de updates del miembro)
+2. Standup generado por IA (propone basandose en chats recientes)
+3. Generacion de DailyReport (agregando StandupCheckin + TicketCache)
+4. Vista Standup refactorizada
+5. Vista board (multi-modo: lectura con tracker, interactivo con drag & drop en manual)
+6. Sprints manuales opcionales (modelo Sprint + endpoints + filtro en board)
 
 ### Paso 6: Riesgos, retro, reports (semana 6-8)
 
-1. Deteccion de riesgos
-2. Retrospectiva asincrona
-3. Resumen semanal para stakeholders
-4. Onboarding contextual
-5. Dependency mapping
+1. Deteccion de riesgos (tickets estancados, blockers viejos, sprint overload)
+2. Alertas proactivas para leads (inyeccion en prompt + Notification type: risk_alert)
+3. Retrospectiva asincrona (modelo Retrospective + RetroFeedback + flujo en chat)
+4. Resumen semanal para stakeholders (generacion IA + vista reports)
+5. Onboarding contextual (primer mensaje = bienvenida con contexto del proyecto)
+6. Dependency mapping (deteccion en chat, registro en KnowledgeEntry)
 
-### Paso 7: Limpieza (semana 8)
+### Paso 7: Limpieza (semana 8+)
 
 1. Eliminar modelos viejos: Ticket, TicketWorkflow, TicketTransition, TicketMessage
-2. Eliminar vistas: dashboard, kanban, tickets
+2. Eliminar vistas: dashboard, kanban, tickets, reports (reemplazadas por board, proposals, standup)
 3. Eliminar codigo de tickets internos en api.ts, types, etc.
 4. Eliminar Socket.io mini-services (si no se usan)
 5. Limpiar imports y dependencias no usadas
+6. Actualizar types/index.ts para reflejar modelos finales
 
 ---
 
@@ -2527,11 +3217,16 @@ Usa la secuencia Fibonacci: 1, 2, 3, 5, 8, 13, 21
 | Modelo | Fase | Tipo |
 |--------|------|------|
 | User | existente | auth |
+| Organization | **nuevo** (Paso 0) | tenant |
+| OrgMember | **nuevo** (Paso 0) | tenant/auth |
+| Invitation | **nuevo** (Paso 0) | auth |
 | Team | existente (mod) | config |
 | TeamMember | existente (mod) | config |
 | Project | existente (mod) | config |
 | ProjectAssignment | existente | config |
+| Sprint | **nuevo** (Paso 1) | config/manual |
 | Message | existente | core (chat) |
+| Notification | **nuevo** (Paso 0) | comunicacion |
 | KnowledgeEntry | existente (mod) | core |
 | DailyReport | existente (mod) | standup |
 | StandupCheckin | existente (mod) | standup |
@@ -2547,8 +3242,9 @@ Usa la secuencia Fibonacci: 1, 2, 3, 5, 8, 13, 21
 
 | Fase | Endpoints nuevos |
 |------|-----------------|
-| F1 (Chat) | Refactor de `POST /api/chat` |
-| F2 (Tracker sync) | `GET /api/tickets/sync`, `GET/PUT /api/tickets/cache/:key`, `POST /api/tickets/cache/:key/comment`, `POST /api/import/tickets` |
+| Paso 0 (Infra) | `POST /api/register` (refactor), `POST/GET/DELETE /api/invitations`, `POST /api/invitations/:token/accept`, `GET/PATCH/POST /api/notifications`, `GET /api/events/stream` (SSE) |
+| F1 (Chat) | Refactor de `POST /api/chat` (7 bloques, cross-member, acciones JSON) |
+| F2 (Tracker sync) | `GET /api/tickets/sync`, `GET/PATCH /api/tickets/cache/:id`, `POST /api/import/tickets`, `POST/GET/PATCH /api/projects/:id/sprints` |
 | F3 (Propuestas) | `GET/POST /api/proposals`, `PUT /api/proposals/:id`, `POST /api/proposals/:id/approve`, `POST /api/proposals/:id/reject` |
 | F4 (Estimacion) | `POST /api/estimations`, `GET /api/estimations`, `POST /api/estimations/:id/vote`, `POST /api/estimations/:id/close`, `POST /api/estimations/:id/sync` |
 | F5 (Standup) | Refactor de `POST /api/standup`, `POST /api/reports/daily` |

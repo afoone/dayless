@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
-import bcrypt from 'bcryptjs'
 import { z } from 'zod'
+import { registerUserWithOrganization } from '@/lib/register-user'
 
 const registerSchema = z.object({
   email: z.string().email('Email inválido'),
@@ -15,40 +15,17 @@ export async function POST(request: NextRequest) {
 
     if (!parsed.success) {
       return NextResponse.json(
-        { success: false, error: parsed.error.errors[0].message },
+        { success: false, error: parsed.error.issues[0]?.message || 'Invalid payload' },
         { status: 400 }
       )
     }
 
     const { email, password, name } = parsed.data
-
-    // Import PrismaClient directly to avoid module cache issues
-    const { PrismaClient } = await import('@prisma/client')
-    const prisma = new PrismaClient()
-
-    // Check if user already exists
-    const existing = await prisma.user.findUnique({ where: { email } })
-    if (existing) {
-      await prisma.$disconnect()
-      return NextResponse.json(
-        { success: false, error: 'Este email ya está registrado' },
-        { status: 409 }
-      )
-    }
-
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 12)
-
-    // Create user
-    const user = await prisma.user.create({
-      data: {
-        email,
-        password: hashedPassword,
-        name,
-      },
+    const { user, organization, orgMember } = await registerUserWithOrganization({
+      email,
+      password,
+      name,
     })
-
-    await prisma.$disconnect()
 
     return NextResponse.json({
       success: true,
@@ -56,10 +33,27 @@ export async function POST(request: NextRequest) {
         id: user.id,
         email: user.email,
         name: user.name,
+        organization: {
+          id: organization.id,
+          name: organization.name,
+          slug: organization.slug,
+          plan: organization.plan,
+          maxUsers: organization.maxUsers,
+        },
+        orgMember: {
+          id: orgMember.id,
+          role: orgMember.role,
+        },
+        onboardingRequired: true,
       },
     })
   } catch (error) {
-    console.error('Register error:', error)
+    if (error instanceof Error && error.message === 'EMAIL_EXISTS') {
+      return NextResponse.json(
+        { success: false, error: 'Este email ya está registrado' },
+        { status: 409 }
+      )
+    }
     return NextResponse.json(
       { success: false, error: 'Error al crear la cuenta' },
       { status: 500 }

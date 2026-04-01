@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
-import bcrypt from 'bcryptjs'
 import { z } from 'zod'
-import { Prisma } from '@prisma/client'
+import { registerUserWithOrganization } from '@/lib/register-user'
 
 const registerSchema = z.object({
   email: z.string().email('Email inválido'),
@@ -16,50 +15,45 @@ export async function POST(request: NextRequest) {
 
     if (!parsed.success) {
       return NextResponse.json(
-        { success: false, error: parsed.error.errors[0].message },
+        { success: false, error: parsed.error.issues[0]?.message || 'Invalid payload' },
         { status: 400 }
       )
     }
 
     const { email, password, name } = parsed.data
+    const { user, organization, orgMember } = await registerUserWithOrganization({
+      email,
+      password,
+      name,
+    })
 
-    // Use db from lib which works
-    const { db } = await import('@/lib/db')
-
-    // Check if user already exists via raw SQL
-    const existing = await db.$queryRaw`
-      SELECT id FROM "User" WHERE email = ${email} LIMIT 1
-    ` as any[]
-
-    if (existing && existing.length > 0) {
+    return NextResponse.json({
+      success: true,
+      data: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        organization: {
+          id: organization.id,
+          name: organization.name,
+          slug: organization.slug,
+          plan: organization.plan,
+          maxUsers: organization.maxUsers,
+        },
+        orgMember: {
+          id: orgMember.id,
+          role: orgMember.role,
+        },
+        onboardingRequired: true,
+      },
+    })
+  } catch (error) {
+    if (error instanceof Error && error.message === 'EMAIL_EXISTS') {
       return NextResponse.json(
         { success: false, error: 'Este email ya está registrado' },
         { status: 409 }
       )
     }
-
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 12)
-
-    // Create user via raw SQL
-    const id = 'usr_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8)
-    const now = new Date().toISOString()
-
-    await db.$executeRaw`
-      INSERT INTO "User" (id, email, password, name, "createdAt", "updatedAt")
-      VALUES (${id}, ${email}, ${hashedPassword}, ${name}, ${now}, ${now})
-    `
-
-    return NextResponse.json({
-      success: true,
-      data: {
-        id,
-        email,
-        name,
-      },
-    })
-  } catch (error) {
-    console.error('Register error:', error)
     return NextResponse.json(
       { success: false, error: 'Error al crear la cuenta' },
       { status: 500 }

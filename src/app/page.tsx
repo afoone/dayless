@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useCallback } from 'react'
+import { useEffect, useCallback, useRef } from 'react'
 import { useSession } from 'next-auth/react'
 import { useAppStore } from '@/store/app-store'
 import { AuthGate } from '@/components/auth/auth-gate'
@@ -18,7 +18,7 @@ import KnowledgeView from '@/components/views/knowledge-view'
 import StandupView from '@/components/views/standup-view'
 import ReportsView from '@/components/views/reports-view'
 import SettingsView from '@/components/views/settings-view'
-import { getTeams, getMembers } from '@/lib/api'
+import { getTeams, getMembers, getNotificationCount } from '@/lib/api'
 import type { AppView, Team, TeamMember } from '@/types'
 
 const viewComponents: Record<AppView, React.ComponentType> = {
@@ -37,8 +37,16 @@ const viewComponents: Record<AppView, React.ComponentType> = {
 
 function AppShell() {
   const { data: session } = useSession()
-  const { currentView, setTeams, setCurrentMember } = useAppStore()
+  const {
+    currentView,
+    setTeams,
+    setCurrentMember,
+    currentMember,
+    setUnreadNotifications,
+    incrementUnreadNotifications,
+  } = useAppStore()
   const ViewComponent = viewComponents[currentView]
+  const eventSourceRef = useRef<EventSource | null>(null)
 
   // Load teams
   const loadTeams = useCallback(async () => {
@@ -100,6 +108,17 @@ function AppShell() {
     }
   }, [session, setCurrentMember])
 
+  const loadNotificationCount = useCallback(async () => {
+    if (!currentMember?.id || !currentMember?.teamId) {
+      setUnreadNotifications(0)
+      return
+    }
+    const result = await getNotificationCount(currentMember.id)
+    if (result.success && result.data) {
+      setUnreadNotifications(result.data.unreadCount)
+    }
+  }, [currentMember, setUnreadNotifications])
+
   // Load teams once on mount
   useEffect(() => {
     loadTeams()
@@ -109,6 +128,36 @@ function AppShell() {
   useEffect(() => {
     resolveMember()
   }, [resolveMember])
+
+  useEffect(() => {
+    loadNotificationCount()
+  }, [loadNotificationCount])
+
+  useEffect(() => {
+    if (!currentMember?.id || !currentMember?.teamId) return
+
+    eventSourceRef.current?.close()
+    const source = new EventSource(`/api/events/stream?memberId=${encodeURIComponent(currentMember.id)}`)
+    eventSourceRef.current = source
+
+    source.addEventListener('notification', () => {
+      incrementUnreadNotifications()
+    })
+    source.addEventListener('message', () => {
+      incrementUnreadNotifications()
+    })
+
+    source.onerror = () => {
+      // browser auto-reconnects for SSE
+    }
+
+    return () => {
+      source.close()
+      if (eventSourceRef.current === source) {
+        eventSourceRef.current = null
+      }
+    }
+  }, [currentMember, incrementUnreadNotifications])
 
   return (
     <div className="flex h-screen bg-white overflow-hidden">
