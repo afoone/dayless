@@ -25,16 +25,11 @@ export async function POST(request: NextRequest) {
     }
 
     // Gather data for report
-    const [team, standups, messages, knowledge, projects] = await Promise.all([
+    const [team, standups, knowledge, projects] = await Promise.all([
       db.team.findUnique({ where: { id: teamId }, include: { members: true } }),
       db.standupCheckin.findMany({
         where: { date, member: { teamId } },
         include: { member: { select: { name: true, role: true } } },
-      }),
-      db.message.findMany({
-        where: { teamId, createdAt: { gte: new Date(date) } },
-        orderBy: { createdAt: 'desc' },
-        take: 20,
       }),
       db.knowledgeEntry.findMany({
         where: { teamId },

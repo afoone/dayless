@@ -234,15 +234,7 @@ export async function POST() {
       db.knowledgeEntry.create({ data: { teamId: frontendTeam.id, key: 'Frontend Testing', value: 'Use Vitest for unit tests and Playwright for E2E. Minimum 80% coverage for new code.', category: 'technical', source: 'Frontend Team Lead', confidence: 85, isVerified: true } }),
     ])
 
-    // Create chat messages
-    const today = new Date()
-    await Promise.all([
-      db.message.create({ data: { teamId: frontendTeam.id, senderName: 'Dayless.ai', senderType: 'ai', content: '¡Buenos días equipo! 👋 Soy vuestro Scrum Master virtual. ¿Cómo va el sprint? ¿Hay algún blocker que necesite atención?', createdAt: new Date(today.getTime() - 3600000) } }),
-      db.message.create({ data: { teamId: frontendTeam.id, senderId: members[1].id, senderName: 'Carlos Rodríguez', senderType: 'member', content: 'Buenos días. Estoy trabajando en el refactor del módulo de pagos. Tengo un problema con la integración de Stripe.', createdAt: new Date(today.getTime() - 3500000) } }),
-      db.message.create({ data: { teamId: frontendTeam.id, senderName: 'Dayless.ai', senderType: 'ai', content: 'Entendido, Carlos. He registrado el problema con la integración de Stripe.\n\n1. ¿Es un problema de autenticación con la API de Stripe?\n2. ¿Es un problema con los webhooks?\n3. ¿Es un problema con el flujo de pago?\n\nVoy a preguntar a Ana si tiene experiencia con esta integración.', createdAt: new Date(today.getTime() - 3400000) } }),
-      db.message.create({ data: { teamId: frontendTeam.id, senderId: members[0].id, senderName: 'Ana López', senderType: 'member', content: 'Yo trabajé con Stripe el sprint pasado. Carlos, el problema probablemente sea el webhook signature verification. Usamos el endpoint /api/webhooks/stripe.', createdAt: new Date(today.getTime() - 3000000) } }),
-      db.message.create({ data: { teamId: frontendTeam.id, senderName: 'Dayless.ai', senderType: 'ai', content: '**Perfecto, gracias Ana.** He guardado esta información en la base de conocimiento:\n\n📌 **Knowledge Entry**: Stripe webhook verification se hace en `/api/webhooks/stripe`. Ana tiene experiencia previa con la integración.\n\nCarlos, ¿puedes verificar si el problema está relacionado con la firma del webhook?', createdAt: new Date(today.getTime() - 2800000) } }),
-    ])
+    // Private chat is per-member; no seeded team channel messages
 
     // Create standups
     const todayStr = today.toISOString().split('T')[0]
@@ -259,7 +251,7 @@ export async function POST() {
         members: 14,
         projects: 6,
         knowledge: 9,
-        messages: 5,
+        messages: 0,
         standups: 3,
         users: 3,
         tickets: 6,

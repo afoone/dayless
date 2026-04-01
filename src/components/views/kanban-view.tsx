@@ -9,6 +9,7 @@ import {
   getMembers,
   getTeams,
   getProjectWorkflows,
+  getTicket,
   getTicketMessages,
   getTickets,
   runTicketAiAction,
@@ -65,12 +66,11 @@ const defaultWorkflowTemplate: Array<Partial<TicketWorkflow>> = [
 const priorities = ['low', 'medium', 'high', 'critical']
 
 export default function KanbanView() {
-  const { currentMember, setCurrentView } = useAppStore()
+  const { currentMember, setCurrentView, contextProjectId, setContextProjectId } = useAppStore()
 
   const [projects, setProjects] = useState<Project[]>([])
   const [teams, setTeams] = useState<Array<{ id: string; name: string; color: string }>>([])
   const [members, setMembers] = useState<TeamMember[]>([])
-  const [selectedProjectId, setSelectedProjectId] = useState<string>('')
   const [workflows, setWorkflows] = useState<TicketWorkflow[]>([])
   const [tickets, setTickets] = useState<Ticket[]>([])
   const [isLoading, setIsLoading] = useState(true)
@@ -109,7 +109,7 @@ export default function KanbanView() {
     const teamId = currentMember?.teamId
     if (!currentMember?.id || !teamId) return
     Promise.all([getMemberProjects(currentMember.id), getMembers(teamId), getTeams()])
-      .then(async ([projectsRes, membersRes, teamsRes]) => {
+      .then(([projectsRes, membersRes, teamsRes]) => {
         if (projectsRes.success && projectsRes.data) {
           const raw = projectsRes.data.projects
           const list = Array.isArray(raw) ? (raw as unknown as Project[]) : []
@@ -117,10 +117,14 @@ export default function KanbanView() {
           const merged =
             def && !list.some((p) => p.id === def.id) ? [def, ...list] : list
           setProjects(merged)
-          if (merged.length > 0 && !selectedProjectId) {
+          const { contextProjectId: ctx, setContextProjectId: setCtx } = useAppStore.getState()
+          const valid = Boolean(ctx && merged.some((p) => p.id === ctx))
+          if (merged.length === 0) {
+            setCtx(null)
+          } else if (!valid) {
             const defId = projectsRes.data.member?.defaultProjectId
             const pick = defId ? merged.find((p) => p.id === defId) : merged[0]
-            setSelectedProjectId((pick ?? merged[0]).id)
+            setCtx((pick ?? merged[0]).id)
           }
         }
         if (membersRes.success && Array.isArray(membersRes.data)) {
@@ -131,37 +135,37 @@ export default function KanbanView() {
         }
       })
       .finally(() => setIsLoading(false))
-  }, [currentMember?.id, currentMember?.teamId, selectedProjectId])
+  }, [currentMember?.id, currentMember?.teamId])
 
   useEffect(() => {
     const teamId = currentMember?.teamId
-    if (!teamId || !selectedProjectId) return
+    if (!teamId || !contextProjectId) return
 
     const boot = async () => {
       setIsLoading(true)
-      const workflowsRes = await getProjectWorkflows(selectedProjectId)
+      const workflowsRes = await getProjectWorkflows(contextProjectId)
       let statusList = (workflowsRes.success && workflowsRes.data ? workflowsRes.data : []) as TicketWorkflow[]
 
       if (statusList.length === 0) {
-        const created = await saveProjectWorkflows(selectedProjectId, defaultWorkflowTemplate)
+        const created = await saveProjectWorkflows(contextProjectId, defaultWorkflowTemplate)
         statusList = (created.success && created.data ? created.data : []) as TicketWorkflow[]
       }
       setWorkflows(statusList)
 
-      const ticketsRes = await getTickets({ teamId, projectId: selectedProjectId })
+      const ticketsRes = await getTickets({ teamId, projectId: contextProjectId })
       setTickets((ticketsRes.success && Array.isArray(ticketsRes.data) ? ticketsRes.data : []) as Ticket[])
       setIsLoading(false)
     }
 
     boot()
-  }, [currentMember?.teamId, selectedProjectId])
+  }, [currentMember?.teamId, contextProjectId])
 
   const refreshProjectData = async () => {
     const teamId = currentMember?.teamId
-    if (!teamId || !selectedProjectId) return
+    if (!teamId || !contextProjectId) return
     const [workflowsRes, ticketsRes] = await Promise.all([
-      getProjectWorkflows(selectedProjectId),
-      getTickets({ teamId, projectId: selectedProjectId }),
+      getProjectWorkflows(contextProjectId),
+      getTickets({ teamId, projectId: contextProjectId }),
     ])
     if (workflowsRes.success && workflowsRes.data) setWorkflows(workflowsRes.data)
     if (ticketsRes.success && ticketsRes.data) setTickets(ticketsRes.data)
@@ -169,10 +173,10 @@ export default function KanbanView() {
 
   const handleCreateTicket = async () => {
     const teamId = currentMember?.teamId
-    if (!teamId || !selectedProjectId || !newTicket.title.trim()) return
+    if (!teamId || !contextProjectId || !newTicket.title.trim()) return
     const res = await createTicket({
       teamId,
-      projectId: selectedProjectId,
+      projectId: contextProjectId,
       title: newTicket.title.trim(),
       description: newTicket.description.trim() || undefined,
       priority: newTicket.priority,
@@ -260,26 +264,45 @@ export default function KanbanView() {
     }
   }
 
-  const runAi = async (action: 'summarize' | 'suggest_state' | 'estimate') => {
+  const runAi = async (action: 'summarize' | 'suggest_state' | 'estimate' | 'refine_description') => {
     if (!activeTicket) return
+    const applyToTicket = action === 'estimate' || action === 'refine_description'
     setIsRunningAi(true)
-    const res = await runTicketAiAction(activeTicket.id, action)
+    const res = await runTicketAiAction(activeTicket.id, action, { applyToTicket })
     setIsRunningAi(false)
     if (!res.success || !res.data) {
       toast.error(res.error || 'No se pudo ejecutar IA')
       return
     }
 
-    const ai = res.data as { summary?: string; suggestedStatusId?: string; needsEstimate?: boolean; estimateSuggestion?: string; nextSteps?: string[]; risks?: string[] }
+    const ai = res.data as {
+      summary?: string
+      suggestedStatusId?: string
+      needsEstimate?: boolean
+      estimateSuggestion?: string
+      nextSteps?: string[]
+      risks?: string[]
+      refinedDescription?: string
+      applied?: { estimate?: string; description?: string }
+    }
     const lines: string[] = []
     if (ai.summary) lines.push(`**Resumen:** ${ai.summary}`)
+    if (ai.refinedDescription) lines.push(`**Descripción refinada:**\n\n${ai.refinedDescription}`)
     if (ai.estimateSuggestion) lines.push(`**Estimación sugerida:** ${ai.estimateSuggestion}`)
+    if (ai.applied?.estimate) lines.push(`*(Estimación guardada en el ticket: ${ai.applied.estimate})*`)
+    if (ai.applied?.description) lines.push('*(Descripción del ticket actualizada.)*')
     if (Array.isArray(ai.nextSteps) && ai.nextSteps.length > 0) lines.push(`**Siguientes pasos:** ${ai.nextSteps.join(' | ')}`)
     if (Array.isArray(ai.risks) && ai.risks.length > 0) lines.push(`**Riesgos:** ${ai.risks.join(' | ')}`)
     if (ai.needsEstimate) lines.push('**Pendiente estimación**')
     if (ai.suggestedStatusId) {
       const s = workflows.find(w => w.id === ai.suggestedStatusId)
       if (s) lines.push(`**Estado sugerido:** ${s.name}`)
+    }
+
+    if (applyToTicket && (ai.applied?.description || ai.applied?.estimate)) {
+      const tRes = await getTicket(activeTicket.id)
+      if (tRes.success && tRes.data) setActiveTicket(tRes.data as Ticket)
+      await refreshProjectData()
     }
 
     const aiRes = await sendTicketMessage(activeTicket.id, {
@@ -290,7 +313,7 @@ export default function KanbanView() {
     })
     if (aiRes.success && aiRes.data) {
       setTicketMessages(prev => [...prev, aiRes.data!])
-      toast.success('Análisis IA completado')
+      toast.success(action === 'refine_description' ? 'Descripción refinada' : 'Análisis IA completado')
     }
   }
 
@@ -305,7 +328,7 @@ export default function KanbanView() {
           <Button variant="outline" onClick={() => setCurrentView('tickets')} className="min-h-11">
             <LayoutList className="size-4 mr-1" /> Todos los tickets
           </Button>
-          <Select value={selectedProjectId} onValueChange={setSelectedProjectId}>
+          <Select value={contextProjectId ?? ''} onValueChange={setContextProjectId}>
             <SelectTrigger className="w-[220px]">
               <SelectValue placeholder="Selecciona proyecto" />
             </SelectTrigger>
@@ -435,7 +458,7 @@ export default function KanbanView() {
               <SheetHeader className="p-6 border-b">
                 <SheetTitle className="text-left">{activeTicket.title}</SheetTitle>
                 <SheetDescription className="text-left">
-                  Detalle, estado y chat de refinamiento del ticket
+                  Chat visible para el equipo. La IA interviene solo con Estimar / Refinar (y aplica al ticket).
                 </SheetDescription>
               </SheetHeader>
 
@@ -454,6 +477,9 @@ export default function KanbanView() {
                 </Button>
                 <Button variant="outline" size="sm" onClick={() => runAi('estimate')} disabled={isRunningAi}>
                   <Sparkles className="size-4 mr-1" /> Estimar
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => runAi('refine_description')} disabled={isRunningAi}>
+                  <Sparkles className="size-4 mr-1" /> Refinar descripción
                 </Button>
               </div>
 

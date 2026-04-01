@@ -26,6 +26,8 @@ model Team {
   name        String
   description String?
   color       String       @default("#10b981")
+  /// Guía de story points (markdown). La IA la usa al estimar tickets y como referencia del equipo.
+  storyPointGuide String?
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
 
@@ -58,6 +60,7 @@ model TeamMember {
   projectAssignments ProjectAssignment[]
   assignedTickets Ticket[] @relation("TicketAssignee")
   reportedTickets Ticket[] @relation("TicketReporter")
+  privateChatMessages Message[]
 
   @@index([teamId])
   @@index([userId])
@@ -83,6 +86,7 @@ model Project {
   tickets         Ticket[]
   defaultForMembers TeamMember[] @relation("MemberDefaultProject")
   memberAssignments ProjectAssignment[]
+  chatMessages    Message[]
 
   @@index([teamId])
 }
@@ -189,18 +193,27 @@ model TicketTransition {
 }
 
 model Message {
-  id         String   @id @default(cuid())
-  teamId     String
-  senderId   String?  // null for AI
-  senderName String
-  senderType String   @default("member") // member, ai, system
-  content    String
-  metadata   String?  // JSON string for additional context
-  createdAt  DateTime @default(now())
+  id              String   @id @default(cuid())
+  teamId          String
+  /// Miembro del equipo dueño de este hilo (chat privado 1:1 con la IA); todas las líneas del hilo comparten el mismo owner.
+  ownerMemberId   String
+  /// Hilo distinto por proyecto: mismo miembro, distintos `projectId` → historiales separados.
+  projectId       String
+  senderId        String? // null for AI
+  senderName      String
+  senderType      String  @default("member") // member, ai, system
+  content         String
+  metadata        String? // JSON string for additional context
+  createdAt       DateTime @default(now())
 
-  team       Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  team    Team       @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  owner   TeamMember @relation(fields: [ownerMemberId], references: [id], onDelete: Cascade)
+  project Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@index([teamId])
+  @@index([ownerMemberId])
+  @@index([projectId])
+  @@index([teamId, ownerMemberId, projectId])
   @@index([createdAt])
 }
 

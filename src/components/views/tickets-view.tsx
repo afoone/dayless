@@ -9,6 +9,7 @@ import {
   getProjects,
   getProjectWorkflows,
   getTeams,
+  getTicket,
   getTicketMessages,
   getTickets,
   runTicketAiAction,
@@ -258,10 +259,11 @@ export default function TicketsView() {
     }
   }
 
-  const runAi = async (action: 'summarize' | 'suggest_state' | 'estimate') => {
+  const runAi = async (action: 'summarize' | 'suggest_state' | 'estimate' | 'refine_description') => {
     if (!activeTicket) return
+    const applyToTicket = action === 'estimate' || action === 'refine_description'
     setIsRunningAi(true)
-    const res = await runTicketAiAction(activeTicket.id, action)
+    const res = await runTicketAiAction(activeTicket.id, action, { applyToTicket })
     setIsRunningAi(false)
     if (!res.success || !res.data) {
       toast.error(res.error || 'No se pudo ejecutar IA')
@@ -275,10 +277,19 @@ export default function TicketsView() {
       estimateSuggestion?: string
       nextSteps?: string[]
       risks?: string[]
+      refinedDescription?: string
+      applied?: { estimate?: string; description?: string }
     }
     const lines: string[] = []
     if (ai.summary) lines.push(`**Resumen:** ${ai.summary}`)
+    if (ai.refinedDescription) {
+      lines.push(
+        `**Descripción refinada:**\n\n${ai.refinedDescription}`
+      )
+    }
     if (ai.estimateSuggestion) lines.push(`**Estimación sugerida:** ${ai.estimateSuggestion}`)
+    if (ai.applied?.estimate) lines.push(`*(Estimación guardada en el ticket: ${ai.applied.estimate})*`)
+    if (ai.applied?.description) lines.push('*(Descripción del ticket actualizada.)*')
     if (Array.isArray(ai.nextSteps) && ai.nextSteps.length > 0)
       lines.push(`**Siguientes pasos:** ${ai.nextSteps.join(' | ')}`)
     if (Array.isArray(ai.risks) && ai.risks.length > 0)
@@ -289,6 +300,12 @@ export default function TicketsView() {
       if (s) lines.push(`**Estado sugerido:** ${s.name}`)
     }
 
+    if (applyToTicket && (ai.applied?.description || ai.applied?.estimate)) {
+      const tRes = await getTicket(activeTicket.id)
+      if (tRes.success && tRes.data) setActiveTicket(tRes.data as Ticket)
+      await refreshListOnly()
+    }
+
     const aiRes = await sendTicketMessage(activeTicket.id, {
       senderName: 'Dayless.ai',
       senderType: 'ai',
@@ -297,7 +314,7 @@ export default function TicketsView() {
     })
     if (aiRes.success && aiRes.data) {
       setTicketMessages((prev) => [...prev, aiRes.data!])
-      toast.success('Análisis IA completado')
+      toast.success(action === 'refine_description' ? 'Descripción refinada' : 'Análisis IA completado')
     }
   }
 
@@ -558,7 +575,7 @@ export default function TicketsView() {
                   <span className="block">
                     {activeTicket.project?.name ? `Proyecto: ${activeTicket.project.name}` : ''}
                   </span>
-                  Detalle, estado y chat de refinamiento
+                  Chat visible para el equipo. La IA interviene solo con Estimar / Refinar (y aplica al ticket).
                 </SheetDescription>
               </SheetHeader>
 
@@ -595,6 +612,14 @@ export default function TicketsView() {
                 </Button>
                 <Button variant="outline" size="sm" onClick={() => runAi('estimate')} disabled={isRunningAi}>
                   <Sparkles className="size-4 mr-1" /> Estimar
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => runAi('refine_description')}
+                  disabled={isRunningAi}
+                >
+                  <Sparkles className="size-4 mr-1" /> Refinar descripción
                 </Button>
               </div>
 

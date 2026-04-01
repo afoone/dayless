@@ -41,10 +41,11 @@ import {
   Trash2,
   ArrowUp,
   ArrowDown,
+  BookOpen,
 } from 'lucide-react'
 import { useState } from 'react'
 import { useAppStore } from '@/store/app-store'
-import { getMemberProjects, getProjectWorkflows, saveProjectWorkflows } from '@/lib/api'
+import { getMemberProjects, getProjectWorkflows, getTeam, saveProjectWorkflows, updateTeam } from '@/lib/api'
 import type { Project, TicketWorkflow } from '@/types'
 import { toast } from 'sonner'
 
@@ -53,6 +54,8 @@ const itemVariants = { hidden: { opacity: 0, y: 20 }, visible: { opacity: 1, y: 
 
 export default function SettingsView() {
   const { currentMember } = useAppStore()
+  const teamId = currentMember?.teamId ?? null
+  const [storyPointGuide, setStoryPointGuide] = useState('')
   const [standupTime, setStandupTime] = useState('09:00')
   const [standupReminder, setStandupReminder] = useState(true)
   const [reportTime, setReportTime] = useState('18:00')
@@ -61,6 +64,18 @@ export default function SettingsView() {
   const [workflowProjectId, setWorkflowProjectId] = useState('')
   const [workflows, setWorkflows] = useState<Array<Partial<TicketWorkflow>>>([])
   const [workflowLoading, setWorkflowLoading] = useState(false)
+
+  useEffect(() => {
+    if (!teamId) return
+    let cancelled = false
+    void getTeam(teamId).then((res) => {
+      if (cancelled || !res.success || !res.data) return
+      setStoryPointGuide((res.data as { storyPointGuide?: string | null }).storyPointGuide ?? '')
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [teamId])
 
   useEffect(() => {
     if (!currentMember?.id) return
@@ -126,6 +141,19 @@ export default function SettingsView() {
     copy[idx] = copy[next]
     copy[next] = tmp
     setWorkflows(copy.map((w, i) => ({ ...w, position: i })))
+  }
+
+  const saveStoryPointGuide = async () => {
+    if (!teamId) return
+    const res = await updateTeam({
+      id: teamId,
+      storyPointGuide: storyPointGuide.trim() ? storyPointGuide.trim() : null,
+    })
+    if (res.success) {
+      toast.success('Guía de story points guardada')
+    } else {
+      toast.error(res.error || 'No se pudo guardar')
+    }
   }
 
   const saveWorkflowConfig = async () => {
@@ -222,6 +250,51 @@ export default function SettingsView() {
               </div>
               <Switch defaultChecked />
             </div>
+          </CardContent>
+        </Card>
+      </motion.div>
+
+      {/* Team working agreements — story points first; more guides later */}
+      <motion.div variants={itemVariants}>
+        <Card className="border-slate-200/80 bg-white">
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <div className="flex size-8 items-center justify-center rounded-lg bg-emerald-50">
+                <BookOpen className="size-4 text-emerald-600" />
+              </div>
+              <div>
+                <CardTitle className="text-base">Guías de trabajo del equipo</CardTitle>
+                <CardDescription>
+                  Definiciones compartidas. La IA las usa al estimar tickets (y en el chat del Scrum Master).
+                  Por ahora: story points; aquí añadiremos más tipos de guía.
+                </CardDescription>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="space-y-2">
+              <Label>Story points</Label>
+              <Textarea
+                placeholder={'Ej.: 1 = trivial, clarísimo… 3 = un día, 5 = varios días con incertidumbre…'}
+                value={storyPointGuide}
+                onChange={(e) => setStoryPointGuide(e.target.value)}
+                rows={10}
+                disabled={!teamId}
+                className="text-sm font-mono leading-relaxed min-h-44"
+              />
+              <p className="text-xs text-slate-500">
+                Markdown permitido. En el chat de cada ticket, «Estimar» compara con otras tareas ya estimadas
+                del mismo proyecto y con este texto.
+              </p>
+            </div>
+            <Button
+              type="button"
+              className="bg-emerald-600 hover:bg-emerald-700 text-white min-h-11"
+              disabled={!teamId}
+              onClick={() => void saveStoryPointGuide()}
+            >
+              <Save className="size-4 mr-1" /> Guardar guía de story points
+            </Button>
           </CardContent>
         </Card>
       </motion.div>

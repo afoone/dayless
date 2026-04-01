@@ -35,6 +35,8 @@ export interface Team {
   name: string;
   description: string | null;
   color: string;
+  /** Guía de story points (markdown) definida en Ajustes del equipo. */
+  storyPointGuide?: string | null;
   createdAt: string;
   updatedAt: string;
   members?: TeamMember[];
@@ -145,6 +147,8 @@ export interface TicketTransition {
 export interface Message {
   id: string;
   teamId: string;
+  ownerMemberId: string;
+  projectId: string;
   senderId: string | null;
   senderName: string;
   senderType: "member" | "ai" | "system";
@@ -209,6 +213,17 @@ export interface ApiResponse<T = unknown> {
   error: string | null;
 }
 
+/** Borrador listo para confirmar con botones en el chat (no se crea en BD hasta confirmar). */
+export interface PendingInternalTicketConfirm {
+  project?: string;
+  title: string;
+  description: string;
+  priority: string;
+  estimate?: string;
+  assigneeEmail?: string;
+  targetTeam?: string;
+}
+
 // --------------- Create / Update Input Types ---------------
 
 export interface CreateTeamInput {
@@ -222,6 +237,7 @@ export interface UpdateTeamInput {
   name?: string;
   description?: string;
   color?: string;
+  storyPointGuide?: string | null;
 }
 
 export interface CreateMemberInput {
@@ -304,6 +320,8 @@ export interface UpdateTicketInput {
 
 export interface SendMessageInput {
   teamId: string;
+  ownerMemberId: string;
+  projectId: string;
   senderId?: string;
   senderName: string;
   senderType?: "member" | "ai" | "system";

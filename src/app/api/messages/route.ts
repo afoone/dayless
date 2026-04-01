@@ -1,32 +1,43 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
+import { withPrisma } from '@/lib/prisma-fresh'
+import { assertMemberChatProjectAccess } from '@/lib/chat-project-access'
 
 // GET /api/messages - List messages for a team with pagination
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url)
     const teamId = searchParams.get('teamId')
+    const ownerMemberId = searchParams.get('ownerMemberId')
+    const projectId = searchParams.get('projectId')
     const limit = parseInt(searchParams.get('limit') || '50', 10)
     const offset = parseInt(searchParams.get('offset') || '0', 10)
 
-    if (!teamId) {
+    if (!teamId || !ownerMemberId || !projectId) {
       return NextResponse.json(
-        { success: false, error: 'teamId query parameter is required' },
+        { success: false, error: 'teamId, ownerMemberId and projectId query parameters are required' },
         { status: 400 }
       )
     }
 
-    const [messages, total] = await Promise.all([
-      db.message.findMany({
-        where: { teamId },
-        orderBy: { createdAt: 'asc' },
-        take: Math.min(limit, 200),
-        skip: offset,
-      }),
-      db.message.count({
-        where: { teamId },
-      }),
-    ])
+    const access = await assertMemberChatProjectAccess(teamId, ownerMemberId, projectId)
+    if (!access.ok) {
+      return NextResponse.json({ success: false, error: access.error }, { status: 403 })
+    }
+
+    const [messages, total] = await withPrisma((p) =>
+      Promise.all([
+        p.message.findMany({
+          where: { teamId, ownerMemberId, projectId },
+          orderBy: { createdAt: 'asc' },
+          take: Math.min(limit, 200),
+          skip: offset,
+        }),
+        p.message.count({
+          where: { teamId, ownerMemberId, projectId },
+        }),
+      ])
+    )
 
     return NextResponse.json({
       success: true,
@@ -52,16 +63,22 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { teamId, senderId, senderName, content, senderType, metadata } = body
+    const { teamId, ownerMemberId, projectId, senderId, senderName, content, senderType, metadata } = body
 
-    if (!teamId || !content || typeof content !== 'string' || content.trim().length === 0) {
+    if (
+      !teamId ||
+      !ownerMemberId ||
+      !projectId ||
+      !content ||
+      typeof content !== 'string' ||
+      content.trim().length === 0
+    ) {
       return NextResponse.json(
-        { success: false, error: 'teamId and content are required' },
+        { success: false, error: 'teamId, ownerMemberId, projectId and content are required' },
         { status: 400 }
       )
     }
 
-    // Verify team exists
     const team = await db.team.findUnique({ where: { id: teamId } })
     if (!team) {
       return NextResponse.json(
@@ -70,16 +87,25 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const message = await db.message.create({
-      data: {
-        teamId,
-        senderId: senderId || null,
-        senderName: senderName || 'System',
-        senderType: senderType || 'member',
-        content: content.trim(),
-        metadata: metadata ? JSON.stringify(metadata) : null,
-      },
-    })
+    const access = await assertMemberChatProjectAccess(teamId, ownerMemberId, projectId)
+    if (!access.ok) {
+      return NextResponse.json({ success: false, error: access.error }, { status: 403 })
+    }
+
+    const message = await withPrisma((p) =>
+      p.message.create({
+        data: {
+          team: { connect: { id: teamId } },
+          owner: { connect: { id: ownerMemberId } },
+          project: { connect: { id: projectId } },
+          senderId: senderId || null,
+          senderName: senderName || 'System',
+          senderType: senderType || 'member',
+          content: content.trim(),
+          metadata: metadata ? JSON.stringify(metadata) : null,
+        },
+      })
+    )
 
     return NextResponse.json({ success: true, data: message, error: null }, { status: 201 })
   } catch (error: any) {

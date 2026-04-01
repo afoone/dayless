@@ -3,8 +3,17 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { cn } from '@/lib/utils'
 import { useAppStore } from '@/store/app-store'
-import { getMessages, sendChatMessage, getMembers } from '@/lib/api'
-import type { Message, TeamMember } from '@/types'
+import {
+  getMessages,
+  sendChatMessage,
+  confirmChatTicket,
+  getMembers,
+  getMemberProjects,
+  broadcastProjectStandup,
+  getProjectStandupSummary,
+  postChatThreadMessage,
+} from '@/lib/api'
+import type { Message, TeamMember, Project, PendingInternalTicketConfirm } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -12,14 +21,22 @@ import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Separator } from '@/components/ui/separator'
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import {
   Tooltip, TooltipContent, TooltipProvider, TooltipTrigger,
 } from '@/components/ui/tooltip'
 import {
   Send, Bot, MoreVertical, Phone, Video, Search, Hash,
-  AlertCircle, HelpCircle, RefreshCw, Circle, Users,
+  AlertCircle, HelpCircle, RefreshCw, Circle, Users, Ticket, ClipboardList,
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
+import { toast } from 'sonner'
 
 interface DisplayMessage {
   id: string
@@ -27,13 +44,17 @@ interface DisplayMessage {
   senderType: 'member' | 'ai' | 'system'
   content: string
   createdAt: Date
+  pendingTicketConfirm?: PendingInternalTicketConfirm
 }
 
 const quickActions = [
-  { label: 'Standup', icon: RefreshCw, prefix: '/standup ' },
+  { label: 'Rellenar standup', icon: RefreshCw, prefix: '/standup' },
+  { label: 'Standup al equipo', icon: Users, prefix: '/standup-equipo' },
+  { label: 'Resumen standup hoy', icon: ClipboardList, prefix: '/standup-resumen' },
   { label: 'Blocker', icon: AlertCircle, prefix: '/blocker ' },
   { label: 'Question', icon: HelpCircle, prefix: '/question ' },
   { label: 'Update', icon: Hash, prefix: '/update ' },
+  { label: 'Mis tickets', icon: Ticket, prefix: '/mis-tickets ' },
 ]
 
 function TypingIndicator() {
@@ -54,25 +75,64 @@ function TypingIndicator() {
 }
 
 export default function ChatView() {
-  const { currentMember } = useAppStore()
+  const { currentMember, contextProjectId, setContextProjectId, setCurrentView, requestOpenStandupDialog } =
+    useAppStore()
+  const [projects, setProjects] = useState<Project[]>([])
   const [messages, setMessages] = useState<DisplayMessage[]>([])
   const [members, setMembers] = useState<TeamMember[]>([])
   const [inputValue, setInputValue] = useState('')
   const [isTyping, setIsTyping] = useState(false)
   const [showMembers, setShowMembers] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
+  const [confirmingTicketMessageId, setConfirmingTicketMessageId] = useState<string | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  // Load messages and members for the authenticated user's team
+  // Proyectos del miembro + alinear contextProjectId con asignaciones
   useEffect(() => {
     const teamId = currentMember?.teamId
-    if (!teamId) return
+    const ownerId = currentMember?.id
+    if (!teamId || !ownerId) {
+      setProjects([])
+      return
+    }
+    getMemberProjects(ownerId)
+      .then((projectsRes) => {
+        if (!projectsRes.success || !projectsRes.data) return
+        const raw = projectsRes.data.projects
+        const list = Array.isArray(raw) ? (raw as unknown as Project[]) : []
+        const def = projectsRes.data.defaultProject as unknown as Project | null | undefined
+        const merged =
+          def && !list.some((p) => p.id === def.id) ? [def, ...list] : list
+        setProjects(merged)
+        const { contextProjectId: ctx, setContextProjectId: setCtx } = useAppStore.getState()
+        const valid = Boolean(ctx && merged.some((p) => p.id === ctx))
+        if (merged.length === 0) {
+          setCtx(null)
+        } else if (!valid) {
+          const defId = projectsRes.data.member?.defaultProjectId
+          const pick = defId ? merged.find((p) => p.id === defId) : merged[0]
+          setCtx((pick ?? merged[0]).id)
+        }
+      })
+      .catch(console.error)
+  }, [currentMember?.teamId, currentMember?.id])
+
+  // Historial del hilo (miembro + proyecto)
+  useEffect(() => {
+    const teamId = currentMember?.teamId
+    const ownerId = currentMember?.id
+    const projectId = contextProjectId
+    if (!teamId || !ownerId || !projectId) {
+      setIsLoading(false)
+      setMessages([])
+      return
+    }
     setIsLoading(true)
     setMessages([])
 
     Promise.all([
-      getMessages(teamId, 100),
+      getMessages(teamId, ownerId, projectId, 100),
       getMembers(teamId),
     ]).then(([msgsResult, membersResult]) => {
       if (msgsResult.success && msgsResult.data) {
@@ -89,7 +149,68 @@ export default function ChatView() {
         setMembers(membersResult.data)
       }
     }).catch(console.error).finally(() => setIsLoading(false))
-  }, [currentMember?.teamId])
+  }, [currentMember?.teamId, currentMember?.id, contextProjectId])
+
+  const handleDismissTicketDraft = useCallback((proposalMessageId: string) => {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === proposalMessageId ? { ...m, pendingTicketConfirm: undefined } : m
+      )
+    )
+    toast.message('Borrador descartado')
+  }, [])
+
+  const handleConfirmTicketDraft = useCallback(
+    async (draft: PendingInternalTicketConfirm, proposalMessageId: string) => {
+      const teamId = currentMember?.teamId
+      const ownerMemberId = currentMember?.id
+      const projectId = contextProjectId
+      if (!teamId || !ownerMemberId || !projectId) return
+      setConfirmingTicketMessageId(proposalMessageId)
+      try {
+        const res = await confirmChatTicket(
+          teamId,
+          ownerMemberId,
+          projectId,
+          currentMember?.id || null,
+          currentMember?.name || 'Usuario',
+          draft
+        )
+        if (res.success && res.data) {
+          setMessages((prev) => {
+            const cleared = prev.map((m) =>
+              m.id === proposalMessageId ? { ...m, pendingTicketConfirm: undefined } : m
+            )
+            return [
+              ...cleared,
+              {
+                id: res.data!.userMessage.id,
+                senderName: res.data!.userMessage.senderName,
+                senderType: res.data!.userMessage.senderType as 'member' | 'ai' | 'system',
+                content: res.data!.userMessage.content,
+                createdAt: new Date(res.data!.userMessage.createdAt),
+              },
+              {
+                id: res.data!.aiMessage.id,
+                senderName: res.data!.aiMessage.senderName,
+                senderType: 'ai',
+                content: res.data!.aiMessage.content,
+                createdAt: new Date(res.data!.aiMessage.createdAt),
+              },
+            ]
+          })
+          toast.success('Ticket creado')
+        } else {
+          toast.error(res.error || 'No se pudo crear el ticket')
+        }
+      } catch {
+        toast.error('Error de conexión al crear el ticket')
+      } finally {
+        setConfirmingTicketMessageId(null)
+      }
+    },
+    [currentMember, contextProjectId]
+  )
 
   const scrollToBottom = useCallback(() => {
     requestAnimationFrame(() => {
@@ -103,9 +224,79 @@ export default function ChatView() {
 
   const handleSend = async () => {
     const teamId = currentMember?.teamId
-    if (!inputValue.trim() || !teamId || isTyping) return
+    const ownerMemberId = currentMember?.id
+    const projectId = contextProjectId
+    const rawTrim = inputValue.trim()
+    if (!rawTrim || isTyping) return
 
-    const content = inputValue.trim()
+    // Solo `/standup` (sin texto extra): ir al formulario real, no al LLM
+    if (/^\/standup\s*$/i.test(rawTrim)) {
+      if (!teamId || !ownerMemberId) return
+      setInputValue('')
+      if (textareaRef.current) textareaRef.current.style.height = 'auto'
+      requestOpenStandupDialog()
+      setCurrentView('standup')
+      toast.info('Te llevamos al formulario de standup')
+      return
+    }
+
+    if (/^\/standup-equipo\s*$/i.test(rawTrim)) {
+      if (!teamId || !ownerMemberId || !projectId) {
+        toast.error('Elige un proyecto en el selector del chat')
+        return
+      }
+      setInputValue('')
+      if (textareaRef.current) textareaRef.current.style.height = 'auto'
+      const bRes = await broadcastProjectStandup(projectId, ownerMemberId)
+      if (!bRes.success || !bRes.data) {
+        toast.error(bRes.error || 'No se pudo notificar al equipo')
+        return
+      }
+      toast.success(`Aviso de standup enviado a ${bRes.data.notified} persona(s) en su chat de este proyecto`)
+      return
+    }
+
+    if (/^\/standup-resumen\s*$/i.test(rawTrim)) {
+      if (!teamId || !ownerMemberId || !projectId) {
+        toast.error('Elige un proyecto en el selector del chat')
+        return
+      }
+      setInputValue('')
+      if (textareaRef.current) textareaRef.current.style.height = 'auto'
+      const sRes = await getProjectStandupSummary(projectId, ownerMemberId)
+      if (!sRes.success || !sRes.data) {
+        toast.error(sRes.error || 'No se pudo cargar el resumen')
+        return
+      }
+      const postRes = await postChatThreadMessage({
+        teamId,
+        ownerMemberId,
+        projectId,
+        senderName: 'Dayless',
+        senderType: 'system',
+        content: sRes.data.markdown,
+      })
+      if (postRes.success && postRes.data) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: postRes.data!.id,
+            senderName: postRes.data!.senderName,
+            senderType: 'system' as const,
+            content: postRes.data!.content,
+            createdAt: new Date(postRes.data!.createdAt),
+          },
+        ])
+        toast.success('Resumen de standup añadido al hilo')
+      } else {
+        toast.error(postRes.error || 'No se pudo guardar el resumen en el chat')
+      }
+      return
+    }
+
+    if (!teamId || !ownerMemberId || !projectId) return
+
+    const content = rawTrim
     setInputValue('')
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
 
@@ -123,6 +314,8 @@ export default function ChatView() {
     try {
       const result = await sendChatMessage(
         teamId,
+        ownerMemberId,
+        projectId,
         currentMember?.id || null,
         currentMember?.name || 'User',
         content,
@@ -146,6 +339,7 @@ export default function ChatView() {
               senderType: 'ai',
               content: result.data!.aiMessage.content,
               createdAt: new Date(result.data!.aiMessage.createdAt),
+              pendingTicketConfirm: result.data!.pendingTicketConfirm,
             },
           ]
         })
@@ -255,10 +449,25 @@ export default function ChatView() {
                   <h3 className="text-sm font-semibold text-slate-800">Dayless.ai</h3>
                   <Badge className="bg-emerald-100 text-emerald-700 text-[10px] border-0 px-1.5">AI</Badge>
                 </div>
-                <p className="text-[11px] text-emerald-500">Online · Team Chat</p>
+                <p className="text-[11px] text-emerald-500">Online · Chat por proyecto</p>
               </div>
             </div>
           </div>
+          {projects.length > 0 && (
+            <Select
+              value={contextProjectId ?? ''}
+              onValueChange={setContextProjectId}
+            >
+              <SelectTrigger className="w-[min(100%,220px)] h-9 text-xs border-slate-200">
+                <SelectValue placeholder="Proyecto" />
+              </SelectTrigger>
+              <SelectContent>
+                {projects.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
         </div>
 
         {/* Messages */}
@@ -272,6 +481,10 @@ export default function ChatView() {
                 Cargando mensajes...
               </div>
             </div>
+          ) : projects.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full text-center px-4">
+              <p className="text-sm text-slate-500">No tienes proyectos asignados en este equipo. Asigna uno en Equipo o Proyectos para usar el chat.</p>
+            </div>
           ) : messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-center px-4">
               <div className="size-16 rounded-2xl bg-emerald-50 flex items-center justify-center mb-4">
@@ -279,7 +492,7 @@ export default function ChatView() {
               </div>
               <h3 className="text-lg font-semibold text-slate-800 mb-1">Chat con Dayless.ai</h3>
               <p className="text-sm text-slate-400 max-w-sm">
-                Escribe un mensaje para empezar a hablar con tu Scrum Master virtual. Puede ayudarte con standups, blockers, y seguimiento del sprint.
+                Solo tú ves este hilo en el proyecto seleccionado. Cambia de proyecto arriba para otro historial.
               </p>
             </div>
           ) : (
@@ -294,9 +507,19 @@ export default function ChatView() {
                   const isAI = message.senderType === 'ai'
                   const isSystem = message.senderType === 'system'
                   if (isSystem) {
+                    const longSystem = message.content.includes('\n') || message.content.length > 160
+                    if (longSystem) {
+                      return (
+                        <motion.div key={message.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="px-4 md:px-6 py-2">
+                          <div className="rounded-xl border border-slate-200/80 bg-slate-50/90 px-4 py-3 text-sm prose prose-sm prose-slate max-w-none [&_h2]:text-base [&_h2]:font-semibold [&_h3]:text-sm [&_p]:mb-1 [&_ul]:my-1">
+                            <ReactMarkdown>{message.content}</ReactMarkdown>
+                          </div>
+                        </motion.div>
+                      )
+                    }
                     return (
                       <motion.div key={message.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-center py-2">
-                        <Badge variant="secondary" className="text-[11px] font-normal bg-slate-200/50 text-slate-500">{message.content}</Badge>
+                        <Badge variant="secondary" className="text-[11px] font-normal bg-slate-200/50 text-slate-500 max-w-[95%] whitespace-normal text-center">{message.content}</Badge>
                       </motion.div>
                     )
                   }
@@ -333,6 +556,47 @@ export default function ChatView() {
                             <p className="whitespace-pre-wrap">{message.content}</p>
                           )}
                         </div>
+                        {isAI && message.pendingTicketConfirm && (
+                          <div className="mt-3 w-full max-w-md space-y-3 rounded-xl border border-slate-200/90 bg-white p-4 shadow-sm">
+                            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                              Confirmar ticket
+                            </p>
+                            <p className="text-sm font-semibold text-slate-900 line-clamp-2">
+                              {message.pendingTicketConfirm.title}
+                            </p>
+                            <p className="text-xs text-slate-600 line-clamp-6 whitespace-pre-wrap leading-relaxed">
+                              {message.pendingTicketConfirm.description}
+                            </p>
+                            <p className="text-[11px] text-slate-500">
+                              Prioridad: <span className="font-medium text-slate-700">{message.pendingTicketConfirm.priority}</span>
+                              {message.pendingTicketConfirm.project ? (
+                                <> · Proyecto: <span className="font-medium text-slate-700">{message.pendingTicketConfirm.project}</span></>
+                              ) : null}
+                            </p>
+                            <div className="flex flex-wrap gap-2 pt-1">
+                              <Button
+                                type="button"
+                                className="min-h-11 bg-emerald-600 hover:bg-emerald-700 text-white"
+                                disabled={confirmingTicketMessageId === message.id}
+                                onClick={() =>
+                                  handleConfirmTicketDraft(message.pendingTicketConfirm!, message.id)
+                                }
+                              >
+                                <Ticket className="size-4 mr-1.5" />
+                                Crear ticket
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                className="min-h-11 border-slate-200 text-slate-700"
+                                disabled={confirmingTicketMessageId === message.id}
+                                onClick={() => handleDismissTicketDraft(message.id)}
+                              >
+                                Descartar
+                              </Button>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </motion.div>
                   )
@@ -368,7 +632,7 @@ export default function ChatView() {
               className="flex-1 min-h-[44px] max-h-[160px] resize-none rounded-xl border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 placeholder:text-slate-400 focus-visible:ring-emerald-500/20 focus-visible:border-emerald-400"
               rows={1}
             />
-            <Button onClick={handleSend} disabled={!inputValue.trim() || isTyping || !currentMember?.teamId}
+            <Button onClick={handleSend} disabled={!inputValue.trim() || isTyping || !currentMember?.teamId || !currentMember?.id || !contextProjectId}
               className="h-11 w-11 shrink-0 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm disabled:opacity-40">
               <Send className="size-4" />
             </Button>

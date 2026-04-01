@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
+import { withPrisma } from '@/lib/prisma-fresh'
+import { assertMemberChatProjectAccess } from '@/lib/chat-project-access'
 import { listIssues, formatIssuesSummaryForAI, buildConfigFromProject, createIssue, updateIssue, addIssueComment } from '@/lib/github'
 import { searchIssues as jiraSearchIssues, formatIssuesSummaryForAI as jiraFormatSummary, buildConfigFromProject as jiraBuildConfig, createIssue as jiraCreateIssue, updateIssue as jiraUpdateIssue, addComment as jiraAddComment } from '@/lib/jira'
 
@@ -16,7 +18,36 @@ const TICKET_INTENT_RE =
 
 /** Comandos del input del chat (quick actions). No deben disparar fallbacks que meten todo el texto en un solo ticket. */
 function messageStartsWithChatSlashCommand(text: string): boolean {
-  return /^\/(standup|blocker|question|update)\b/i.test((text || '').trim())
+  const t = (text || '').trim()
+  if (/^\/standup-equipo\b/i.test(t)) return true
+  if (/^\/standup-resumen\b/i.test(t)) return true
+  if (/^\/(standup|blocker|question|update)\b/i.test(t)) return true
+  if (/^\/mis-tickets\b/i.test(t)) return true
+  return false
+}
+
+/** Lista markdown de tickets asignados al miembro (chat /mis-tickets). */
+function formatAssignedTicketsMarkdown(
+  tickets: Array<{
+    id: string
+    title: string
+    priority: string
+    updatedAt: Date
+    project?: { name: string } | null
+    status?: { name: string; isDone: boolean } | null
+  }>
+): string {
+  if (tickets.length === 0) return ''
+  return tickets
+    .map((t) => {
+      const proj = t.project?.name || '—'
+      const st = t.status?.name || '—'
+      const done = t.status?.isDone ? ' ✓' : ''
+      const upd = new Date(t.updatedAt).toLocaleDateString('es-ES', { day: '2-digit', month: 'short' })
+      const safeTitle = t.title.replace(/\*\*/g, '')
+      return `- **${safeTitle}** — \`${t.id}\` · ${proj} · ${st}${done} · ${t.priority} · ${upd}`
+    })
+    .join('\n')
 }
 
 /** Evita que el historial del LLM acumule `[Dayless.ai]:` al guardar/refetch mensajes ya prefijados. */
@@ -142,6 +173,7 @@ async function resolveProjectForMemberInternalTicket(
 
 async function tryAppendLatestReporterTicket(
   teamId: string,
+  projectId: string,
   senderId: string | null | undefined,
   latestContent: string
 ): Promise<string | null> {
@@ -152,8 +184,9 @@ async function tryAppendLatestReporterTicket(
   if (TICKET_INTENT_RE.test(append) && append.length > 35) return null
 
   const rows = (await db.$queryRawUnsafe(
-    `SELECT id, description FROM "Ticket" WHERE "teamId" = ? AND "reporterMemberId" = ? AND datetime("createdAt") > datetime('now', '-120 minutes') ORDER BY "createdAt" DESC LIMIT 1`,
+    `SELECT id, description FROM "Ticket" WHERE "teamId" = ? AND "projectId" = ? AND "reporterMemberId" = ? AND datetime("createdAt") > datetime('now', '-120 minutes') ORDER BY "createdAt" DESC LIMIT 1`,
     teamId,
+    projectId,
     senderId
   )) as Array<{ id: string; description: string | null }>
   if (!rows[0]) return null
@@ -172,97 +205,19 @@ async function tryAppendLatestReporterTicket(
 }
 
 async function tryCreateTicketFromConversationIntent(
-  teamId: string,
-  senderId: string | null | undefined,
-  teamProjectRefs: TeamProjectRef[],
-  recentDesc: RecentMsg[]
+  _teamId: string,
+  _senderId: string | null | undefined,
+  _teamProjectRefs: TeamProjectRef[],
+  _recentDesc: RecentMsg[],
+  _chatProjectId: string
 ): Promise<string | null> {
-  const blob = userBlobFromDescendingMessages(recentDesc)
-  if (blob.length < 32) return null
-  if (!TICKET_INTENT_RE.test(blob)) return null
-
-  const hintProject = findProjectByHint(blob, teamProjectRefs)
-  const finalProject =
-    hintProject ||
-    (await resolveProjectForMemberInternalTicket(teamId, senderId, undefined, teamProjectRefs))
-  if (!finalProject) return null
-
-  const workflowRows = (await db.$queryRawUnsafe(
-    'SELECT id FROM "TicketWorkflow" WHERE "projectId" = ? ORDER BY position ASC LIMIT 1',
-    finalProject.id
-  )) as Array<{ id: string }>
-  const workflow = workflowRows[0]
-  if (!workflow) return null
-
-  const lines = blob.split('\n').map((l) => l.trim()).filter(Boolean)
-  const goodLines = lines.filter((l) => !isBadTicketTitleLine(l))
-  const substantive = goodLines.find((l) => l.length >= 12 && /[a-záéíóúñ]{5,}/i.test(l))
-  let rawTitle = (substantive || goodLines[0] || '').slice(0, 140).trim()
-  if (!rawTitle || rawTitle.length < 8 || isBadTicketTitleLine(rawTitle)) {
-    rawTitle = synthesizeFallbackTitle(blob)
-  }
-  rawTitle = rawTitle.slice(0, 140).trim()
-  const rawDesc = blob.slice(0, 4000)
-
-  if (rawTitle.length < 8) return null
-  if (rawDesc.length < 30) return null
-
-  const dup = (await db.$queryRawUnsafe(
-    `SELECT id FROM "Ticket" WHERE "projectId" = ? AND title = ? AND datetime("createdAt") > datetime('now', '-4 minutes') LIMIT 1`,
-    finalProject.id,
-    rawTitle
-  )) as Array<{ id: string }>
-  if (dup[0]) return null
-
-  const priority = /\b(cr[ií]tic|urgent|blocker|p0)\b/i.test(blob)
-    ? 'critical'
-    : /\b(high|alta)\b/i.test(blob) || /urgente/i.test(blob)
-      ? 'high'
-      : 'high'
-
-  const lastRows = (await db.$queryRawUnsafe(
-    'SELECT "order" FROM "Ticket" WHERE "projectId" = ? AND "statusId" = ? ORDER BY "order" DESC LIMIT 1',
-    finalProject.id,
-    workflow.id
-  )) as Array<{ order: number }>
-  const ticketId = 'tkt_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9)
-  const nextOrder = (lastRows[0]?.order || 0) + 1
-  const nowIso = new Date().toISOString()
-
-  await db.$executeRawUnsafe(
-    'INSERT INTO "Ticket" (id, "teamId", "targetTeamId", "projectId", "statusId", title, description, priority, estimate, "order", "reporterMemberId", "assigneeMemberId", "createdByType", "createdByName", "createdAt", "updatedAt") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    ticketId,
-    finalProject.teamId,
-    null,
-    finalProject.id,
-    workflow.id,
-    rawTitle,
-    rawDesc,
-    priority,
-    null,
-    nextOrder,
-    senderId || null,
-    null,
-    'system',
-    'Chat (sistema)',
-    nowIso,
-    nowIso
-  )
-  await db.$executeRawUnsafe(
-    'INSERT INTO "TicketTransition" (id, "ticketId", "toStatusId", reason, "actorType", "actorName", "createdAt") VALUES (?, ?, ?, ?, ?, ?, ?)',
-    'ttr_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9),
-    ticketId,
-    workflow.id,
-    'Creado automáticamente desde intención en chat',
-    'system',
-    'ChatFallback',
-    nowIso
-  )
-  return `✅ Ticket interno creado: ${ticketId} — "${rawTitle}" en ${finalProject.name}${ticketUiVisibilityHint(finalProject.name)} *(fallback servidor: el modelo no ejecutó la acción, pero se registró igual)*`
+  // Los tickets solo se crean tras confirmación explícita en el chat (botones).
+  return null
 }
 
 type InternalTicketJsonPayload = {
   ready?: boolean
+  awaiting_confirm?: boolean
   missing?: string[]
   project?: string
   title?: string
@@ -271,6 +226,37 @@ type InternalTicketJsonPayload = {
   estimate?: string
   assignee_email?: string
   target_team?: string
+}
+
+type PendingInternalTicketPayload = {
+  project?: string
+  title: string
+  description: string
+  priority: string
+  estimate?: string
+  assigneeEmail?: string
+  targetTeam?: string
+}
+
+function buildPendingFromJsonPayload(
+  p: InternalTicketJsonPayload | null,
+  defaultProjectName: string
+): PendingInternalTicketPayload | null {
+  if (!p || p.ready === false) return null
+  if (!(p.awaiting_confirm === true || p.ready === true)) return null
+  const title = (p.title || '').trim()
+  const description = (p.description || '').trim()
+  if (title.length < 8 || description.length < 30) return null
+  const projectHint = (p.project || '').trim() || defaultProjectName
+  return {
+    project: projectHint,
+    title,
+    description,
+    priority: normalizeChatPriority(p.priority),
+    estimate: p.estimate?.trim() || undefined,
+    assigneeEmail: p.assignee_email?.trim() || undefined,
+    targetTeam: p.target_team?.trim() || undefined,
+  }
 }
 
 /** Quita del texto el bloque ```json con internal_ticket (visible para el usuario). */
@@ -331,6 +317,25 @@ function extractInternalTicketJsonBlock(text: string): { cleaned: string; payloa
 
 function actionResultsIndicateInternalTicketCreated(results: string[]): boolean {
   return results.some((r) => /✅ Ticket interno creado/i.test(r))
+}
+
+/**
+ * El modelo está pidiendo datos antes de crear (sin crear aún). En ese caso los fallbacks del servidor no deben insertar ticket.
+ */
+function aiProseSuggestsAwaitingUserTicketDetails(prose: string): boolean {
+  const t = (prose || '').toLowerCase()
+  const q = (prose.match(/\?/g) || []).length
+  const asksProject = /¿en qué proyecto|qué proyecto debería|en qué proyecto debería crearse/i.test(t)
+  const asksPriority = /prioridad.*\?|¿cu[aá]l.*prioridad|prioridad de este/i.test(t)
+  const asksMoreDetail =
+    /más detalles|información adicional|datos adicionales|necesito (?:unos |más )?datos|para crearlo correctamente/i.test(
+      t
+    )
+  const explicitLater = /una vez tengas/i.test(t) || /cuando tengas toda/i.test(t)
+  if (explicitLater) return true
+  if (q >= 2 && (asksProject || asksPriority || asksMoreDetail)) return true
+  if (asksProject && (asksPriority || asksMoreDetail)) return true
+  return false
 }
 
 function normalizeChatPriority(p?: string): string {
@@ -469,17 +474,34 @@ export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url)
     const teamId = searchParams.get('teamId')
+    const projectId = searchParams.get('projectId')
     const limit = parseInt(searchParams.get('limit') || '50')
     const offset = parseInt(searchParams.get('offset') || '0')
 
-    if (!teamId) {
-      return NextResponse.json({ success: false, error: 'teamId is required' }, { status: 400 })
+    const ownerMemberId = new URL(request.url).searchParams.get('ownerMemberId')
+    if (!teamId || !ownerMemberId || !projectId) {
+      return NextResponse.json(
+        { success: false, error: 'teamId, ownerMemberId and projectId are required' },
+        { status: 400 }
+      )
     }
 
-    const [messages, total] = await Promise.all([
-      db.message.findMany({ where: { teamId }, orderBy: { createdAt: 'asc' }, take: limit, skip: offset }),
-      db.message.count({ where: { teamId } }),
-    ])
+    const access = await assertMemberChatProjectAccess(teamId, ownerMemberId, projectId)
+    if (!access.ok) {
+      return NextResponse.json({ success: false, error: access.error }, { status: 403 })
+    }
+
+    const [messages, total] = await withPrisma((p) =>
+      Promise.all([
+        p.message.findMany({
+          where: { teamId, ownerMemberId, projectId },
+          orderBy: { createdAt: 'asc' },
+          take: limit,
+          skip: offset,
+        }),
+        p.message.count({ where: { teamId, ownerMemberId, projectId } }),
+      ])
+    )
 
     return NextResponse.json({ success: true, data: messages, meta: { total, limit, offset } })
   } catch (error) {
@@ -490,39 +512,215 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { teamId, senderId, senderName, senderType, content } = body
 
-    if (!teamId || !content) {
-      return NextResponse.json({ success: false, error: 'teamId and content are required' }, { status: 400 })
+    if (
+      body.confirmInternalTicket &&
+      typeof body.confirmInternalTicket === 'object' &&
+      body.confirmInternalTicket !== null
+    ) {
+      const {
+        teamId,
+        ownerMemberId,
+        projectId,
+        senderId,
+        senderName,
+        confirmInternalTicket: draft,
+      } = body as {
+        teamId?: string
+        ownerMemberId?: string
+        projectId?: string
+        senderId?: string | null
+        senderName?: string
+        confirmInternalTicket: PendingInternalTicketPayload
+      }
+      if (!teamId || !ownerMemberId || !projectId) {
+        return NextResponse.json(
+          { success: false, error: 'teamId, ownerMemberId y projectId son obligatorios' },
+          { status: 400 }
+        )
+      }
+      const access = await assertMemberChatProjectAccess(teamId, ownerMemberId, projectId)
+      if (!access.ok) {
+        return NextResponse.json({ success: false, error: access.error }, { status: 403 })
+      }
+      const title = (draft.title || '').trim()
+      const description = (draft.description || '').trim()
+      if (title.length < 8 || description.length < 30) {
+        return NextResponse.json(
+          { success: false, error: 'Título o descripción del borrador no válidos' },
+          { status: 400 }
+        )
+      }
+      const projects = await db.project.findMany({ where: { teamId } })
+      const teamProjectRefsForChat: TeamProjectRef[] = projects.map((p) => ({
+        id: p.id,
+        name: p.name,
+        teamId: p.teamId,
+      }))
+      const userMessage = await withPrisma((p) =>
+        p.message.create({
+          data: {
+            team: { connect: { id: teamId } },
+            owner: { connect: { id: ownerMemberId } },
+            project: { connect: { id: projectId } },
+            senderId: senderId || null,
+            senderName: senderName || 'Usuario',
+            senderType: 'member',
+            content: 'Confirmo **crear el ticket** acordado con el asistente.',
+          },
+        })
+      )
+      const r = await executeInternalTicketCreate(
+        teamId,
+        senderId || null,
+        teamProjectRefsForChat,
+        {
+          project: draft.project,
+          title,
+          description,
+          priority: normalizeChatPriority(draft.priority),
+          estimate: draft.estimate,
+          assigneeEmail: draft.assigneeEmail,
+          targetTeam: draft.targetTeam,
+        },
+        { createdByType: 'member', createdByName: senderName || 'Usuario' }
+      )
+      const aiBody = r.ok
+        ? `✅ **Ticket creado:** \`${r.ticketId}\` — «${r.title}» en **${r.projectName}**.${ticketUiVisibilityHint(r.projectName)}`
+        : r.message
+      const aiMessage = await withPrisma((p) =>
+        p.message.create({
+          data: {
+            team: { connect: { id: teamId } },
+            owner: { connect: { id: ownerMemberId } },
+            project: { connect: { id: projectId } },
+            senderId: null,
+            senderName: 'Dayless.ai',
+            senderType: 'ai',
+            content: normalizeMessageBodyForHistory(aiBody, 'Dayless.ai'),
+          },
+        })
+      )
+      return NextResponse.json({
+        success: true,
+        data: { userMessage, aiMessage },
+      })
     }
+
+    const { teamId, ownerMemberId, projectId, senderId, senderName, senderType, content } = body
+
+    if (!teamId || !content || !ownerMemberId || !projectId) {
+      return NextResponse.json(
+        { success: false, error: 'teamId, ownerMemberId, projectId and content are required' },
+        { status: 400 }
+      )
+    }
+
+    const access = await assertMemberChatProjectAccess(teamId, ownerMemberId, projectId)
+    if (!access.ok) {
+      return NextResponse.json({ success: false, error: access.error }, { status: 403 })
+    }
+    const chatProjectName = access.projectName
+    let pendingTicketConfirm: PendingInternalTicketPayload | null = null
 
     const skipServerTicketFallbacks = messageStartsWithChatSlashCommand(content)
 
-    // Save user message
-    const userMessage = await db.message.create({
-      data: {
-        teamId,
-        senderId: senderId || null,
-        senderName: senderName || 'Anonymous',
-        senderType: senderType || 'member',
-        content,
-      },
-    })
+    // Save user message (hilo por miembro + proyecto ↔ IA).
+    // Usar `connect` (no escalares sueltos): con Project añadido, Prisma puede inferir mal UncheckedCreateInput en runtime.
+    const userMessage = await withPrisma((p) =>
+      p.message.create({
+        data: {
+          team: { connect: { id: teamId } },
+          owner: { connect: { id: ownerMemberId } },
+          project: { connect: { id: projectId } },
+          senderId: senderId || null,
+          senderName: senderName || 'Anonymous',
+          senderType: senderType || 'member',
+          content,
+        },
+      })
+    )
+
+    let assignedTicketsInject = ''
+    const misTicketsMatch = content.trim().match(/^\/mis-tickets\b\s*(.*)$/is)
+    if (misTicketsMatch) {
+      if (!senderId) {
+        const aiEarly = await withPrisma((p) =>
+          p.message.create({
+            data: {
+              team: { connect: { id: teamId } },
+              owner: { connect: { id: ownerMemberId } },
+              project: { connect: { id: projectId } },
+              senderId: null,
+              senderName: 'Dayless.ai',
+              senderType: 'ai',
+              content: normalizeMessageBodyForHistory(
+                '⚠️ Para listar tus tickets asignados necesitas estar registrado como **miembro del equipo** (sesión con `TeamMember`).',
+                'Dayless.ai'
+              ),
+            },
+          })
+        )
+        return NextResponse.json({ success: true, data: { userMessage, aiMessage: aiEarly } })
+      }
+      const assignedRows = await db.ticket.findMany({
+        where: { teamId, assigneeMemberId: senderId },
+        include: {
+          project: { select: { name: true } },
+          status: { select: { name: true, isDone: true } },
+        },
+        orderBy: { updatedAt: 'desc' },
+        take: 50,
+      })
+      const listMd = formatAssignedTicketsMarkdown(assignedRows)
+      const followUp = (misTicketsMatch[1] || '').trim()
+      if (!followUp) {
+        const body =
+          assignedRows.length === 0
+            ? 'No tienes tickets **asignados** en este equipo. Si quieres, pide crear uno o revisa el tablero en la app.'
+            : `**Tus tickets asignados** (${assignedRows.length})\n\n${listMd}`
+        const aiEarly = await withPrisma((p) =>
+          p.message.create({
+            data: {
+              team: { connect: { id: teamId } },
+              owner: { connect: { id: ownerMemberId } },
+              project: { connect: { id: projectId } },
+              senderId: null,
+              senderName: 'Dayless.ai',
+              senderType: 'ai',
+              content: normalizeMessageBodyForHistory(body, 'Dayless.ai'),
+            },
+          })
+        )
+        return NextResponse.json({ success: true, data: { userMessage, aiMessage: aiEarly } })
+      }
+      assignedTicketsInject = `\n\n## Tickets asignados a **${senderName}** (${assignedRows.length}) — datos reales; no inventes otros ids\n${listMd || '(ninguno)'}\n`
+    }
 
     // Get context for AI response
     const [recentMessages, members, knowledge, team, projects] = await Promise.all([
-      db.message.findMany({ where: { teamId }, orderBy: { createdAt: 'desc' }, take: 20 }),
+      withPrisma((p) =>
+        p.message.findMany({
+          where: { teamId, ownerMemberId, projectId },
+          orderBy: { createdAt: 'desc' },
+          take: 20,
+        })
+      ),
       db.teamMember.findMany({ where: { teamId } }),
       db.knowledgeEntry.findMany({ where: { teamId }, orderBy: { updatedAt: 'desc' }, take: 15 }),
-      db.team.findUnique({ where: { id: teamId } }),
+      withPrisma((p) => p.team.findUnique({ where: { id: teamId } })),
       db.project.findMany({ where: { teamId } }),
     ])
 
-    // Fetch GitHub issues for configured projects
+    const chatProjectRow = projects.find((p) => p.id === projectId)
+
+    // Integraciones GitHub/Jira solo del proyecto de este hilo
     let githubContext = ''
     let jiraContext = ''
     try {
-      const projectsWithGitHub = projects.filter(p => p.githubRepo && p.githubToken)
+      const projectsWithGitHub = chatProjectRow
+        ? [chatProjectRow].filter((p) => p.githubRepo && p.githubToken)
+        : []
       if (projectsWithGitHub.length > 0) {
         const allIssues: string[] = []
         for (const project of projectsWithGitHub) {
@@ -537,7 +735,9 @@ export async function POST(request: NextRequest) {
         if (allIssues.length > 0) githubContext = `\n\nGITHUB ISSUES ABIERTOS:\n${allIssues.join('\n\n')}`
       }
       // Fetch Jira issues
-      const projectsWithJira = projects.filter(p => p.jiraBaseUrl && p.jiraProjectKey && p.jiraToken)
+      const projectsWithJira = chatProjectRow
+        ? [chatProjectRow].filter((p) => p.jiraBaseUrl && p.jiraProjectKey && p.jiraToken)
+        : []
       if (projectsWithJira.length > 0) {
         const allJiraIssues: string[] = []
         for (const project of projectsWithJira) {
@@ -586,6 +786,10 @@ export async function POST(request: NextRequest) {
         ? '(Jira no conectado en este equipo; no uses [JIRA_ACTION].)'
         : `(Solo si el usuario pide Jira explícitamente: claves permitidas ${jiraKeysAllowed.join(', ')} — nunca inventes otras.)`
 
+    const storyPointGuideBlock = team?.storyPointGuide?.trim()
+      ? `\n\nGUÍA DE STORY POINTS DEL EQUIPO (Ajustes → Guías de trabajo): úsala al orientar sobre estimación; la **estimación numérica** de un ticket concreto se hace en el **chat de ese ticket** (botón Estimar), con comparación frente a otros tickets del proyecto.\n${team.storyPointGuide.trim()}`
+      : '\n\n(El equipo puede definir una guía de story points en **Ajustes**; hasta entonces orienta con buenas prácticas y escala coherente.)'
+
     const systemPrompt = `Eres "Dayless.ai", un AI Scrum Master virtual que coordina equipos de desarrollo. Hablas en español por defecto, pero puedes usar inglés si el usuario lo hace.
 
 TU ROL:
@@ -596,6 +800,8 @@ TU ROL:
 - Si no sabes algo, preguntar a quien lo sepa
 - **Tickets del tablero interno** del equipo (crear / actualizar) y, si aplica, GitHub/Jira cuando el usuario lo pida
 - Generar reportes diarios con el progreso del equipo
+
+Este chat es **privado entre tú y el usuario actual**. Hay un **historial distinto por proyecto**: este hilo es solo para **${chatProjectName}**; no mezcles contexto de otros proyectos salvo que el usuario lo cite.
 
 EQUIPO ACTUAL: ${team?.name || 'Sin equipo'}
 MIEMBROS:
@@ -609,31 +815,32 @@ BASE DE CONOCIMIENTO DEL EQUIPO:
 ${knowledgeContext || 'Sin información guardada aún'}
 ${githubContext}
 ${jiraContext}
+${storyPointGuideBlock}
 
 INSTRUCCIONES:
 1. Sé útil y proactivo
 2. Si alguien comparte información útil, indícalo con 📌 para guardarla en la base de conocimiento
 3. Pregunta por blockers y progreso regularmente
-4. Usa formato markdown para respuestas largas. Si el mensaje **empieza por** /standup, /blocker, /question o /update, es un **check-in rápido** (no el cuerpo de un solo ticket): resume ayer/hoy/blockers; si hacen falta tickets, usa **JSON o acciones por incidencia**, no pegues todo el mensaje como una única descripción.
+4. Usa formato markdown para respuestas largas. En la app, **solo** el comando \`/standup\` (sin texto extra) abre el formulario de check-in; aquí solo verás \`/standup …\` con texto: entonces es **check-in rápido** en chat (no el cuerpo de un solo ticket): resume ayer/hoy/blockers; si hacen falta tickets, usa **JSON o acciones por incidencia**, no pegues todo el mensaje como una única descripción. Si el mensaje **empieza por** /blocker, /question o /update, misma lógica de check-in rápido. **/mis-tickets** pide el backlog asignado al usuario; si en el contexto aparece la sección «Tickets asignados», úsala tal cual para recomendaciones.
+4b. **Standup asíncrono del proyecto**: \`/standup-equipo\` (solo, en este hilo de proyecto) envía un aviso al chat de cada persona asignada al proyecto para que dejen su check-in. \`/standup-resumen\` inserta aquí el **estado del standup de hoy** para ese grupo (check-ins guardados; quien falta aparece pendiente). Si piden levantar standup al equipo, sugiere estos comandos.
+4c. **Chat por ticket**: hilo **visible para el equipo** para refining; la IA interviene solo con las acciones **Estimar** o **Refinar descripción** (pueden aplicarse al ticket). Si hablan de refining, orienta hacia ese hilo y esas acciones.
 5. Si detectas un posible blocker, ofrécete a crear un ticket interno para trackearlo
 6. No afirmes "problemas técnicos" ni caídas del sistema a menos que exista evidencia explícita y actual en esta conversación.
-7. **TICKETS INTERNOS (por defecto)** — Si el usuario pide crear un ticket (sin GitHub/Jira):
-   - Campos obligatorios antes de crear: **project** (nombre o id de PROYECTOS DEL EQUIPO), **title** (≥8 caracteres útiles), **description** (≥30 caracteres: qué pasa, alcance, entorno), **priority** (low|medium|high|critical).
-   - **Si falta algo**: responde en lenguaje natural haciendo preguntas y, **al final del mensaje**, incluye **exactamente un** bloque JSON en fencing \`\`\`json (el servidor lo interpretará y lo ocultará al usuario):
+7. **TICKETS INTERNOS (por defecto)** — Si el usuario pide crear un ticket (sin GitHub/Jira). **El servidor nunca inserta el ticket sin el usuario**: debe pulsar **Crear ticket** en la interfaz. Tú solo preparas el borrador en JSON.
+   - **Proyecto del hilo**: **«${chatProjectName}»**. Si no piden otro proyecto, \`project\` en el JSON = \`"${chatProjectName}"\`.
+   - **Borrador listo** (título ≥8, descripción ≥30): en el texto pide explícitamente que **confirmen con el botón «Crear ticket»** del chat. **Al final** del mensaje incluye **exactamente** un bloque \`\`\`json con \`awaiting_confirm: true\` o \`ready: true\` (ambos equivalentes para el servidor) y los campos:
 \`\`\`json
-{"internal_ticket":{"ready":false,"missing":["project","description"],"note":"breve recordatorio opcional"}}
+{"internal_ticket":{"awaiting_confirm":true,"project":"${chatProjectName}","title":"...","description":"...","priority":"medium"}}
 \`\`\`
-   - **Si ya tienes todos los datos**: resume en texto y **al final** incluye el bloque con \`ready: true\` (el servidor creará el ticket con las mismas reglas que la app):
-\`\`\`json
-{"internal_ticket":{"ready":true,"project":"Nombre exacto o pista","title":"...","description":"...","priority":"critical"}}
-\`\`\`
-   Opcionales en el JSON: \`estimate\`, \`assignee_email\`, \`target_team\`.
-   - **Prohibido** inventar ids \`tkt_...\`. El id real solo aparecerá en el bloque "---" del servidor.
-   - Actualizar ticket existente (con **ticketId** del último "---"): sigue usando \`[INTERNAL_TICKET_ACTION: update_ticket | ticketId: tkt_... | description: ... | priority: ... | status: NombreEstado | note: ...]\`
-   - Alternativa legacy (crear): \`[INTERNAL_TICKET_ACTION: create_ticket | ...]\` — preferir **JSON** cuando tengas los datos reunidos.
+   Opcionales: \`estimate\`, \`assignee_email\`, \`target_team\`. **Prohibido** afirmar que el ticket ya existe o inventar \`tkt_...\`; el id llegará tras la confirmación del usuario.
+   - **Si falta info esencial** (\`ready: false\`): sección **«Propuesta de ticket (borrador)»** + lista concreta de huecos; JSON con \`missing\` y \`note\`. No uses \`awaiting_confirm\` hasta tener título y descripción válidos.
+   - Actualizar ticket existente: \`[INTERNAL_TICKET_ACTION: update_ticket | ticketId: tkt_... | ...]\` (no requiere el botón de crear).
+   - Evita \`[INTERNAL_TICKET_ACTION: create_ticket | ...]\`; prefiere el JSON con \`awaiting_confirm\`.
 8. **GitHub** (solo si lo piden): [GITHUB_ACTION: create_issue | repo: owner/repo | title: ... | body: ... | labels: ...], close_issue, comment_issue
 9. **Jira** (solo si lo piden explícitamente y hay clave permitida arriba): [JIRA_ACTION: create_ticket | projectKey: ... | ...], update_ticket, comment_ticket
 10. Referencia: issues GitHub con #número; tickets internos con el id \`tkt_...\` que devuelve el sistema; Jira solo si aplica`
+
+    const systemPromptForModel = systemPrompt + assignedTicketsInject
 
     // Call LLM
     let aiResponseText: string
@@ -643,7 +850,7 @@ INSTRUCCIONES:
       const completion = await zai.chat.completions.create({
         model: process.env.ZAI_MODEL || 'glm-4.5-air',
         messages: [
-          { role: 'assistant', content: systemPrompt },
+          { role: 'assistant', content: systemPromptForModel },
           ...history,
         ],
         thinking: { type: 'disabled' },
@@ -684,32 +891,10 @@ INSTRUCCIONES:
     let actionResults: string[] = []
     const { cleaned: aiResponseForActions, payload: ticketJsonPayload } =
       extractInternalTicketJsonBlock(aiResponseText)
-    let jsonCreateSucceeded = false
-    if (ticketJsonPayload?.ready === true) {
-      const r = await executeInternalTicketCreate(
-        teamId,
-        senderId || null,
-        teamProjectRefsForChat,
-        {
-          project: ticketJsonPayload.project,
-          title: ticketJsonPayload.title || '',
-          description: ticketJsonPayload.description || '',
-          priority: ticketJsonPayload.priority,
-          estimate: ticketJsonPayload.estimate,
-          assigneeEmail: ticketJsonPayload.assignee_email,
-          targetTeam: ticketJsonPayload.target_team,
-        },
-        { createdByType: 'ai', createdByName: 'Dayless.ai' }
-      )
-      if (r.ok) {
-        actionResults.push(
-          `✅ Ticket interno creado: ${r.ticketId} — "${r.title}" en ${r.projectName}${ticketUiVisibilityHint(r.projectName)}`
-        )
-        jsonCreateSucceeded = true
-      } else {
-        actionResults.push(r.message)
-      }
-    }
+    pendingTicketConfirm = buildPendingFromJsonPayload(ticketJsonPayload, chatProjectName)
+    const modelPendingMoreTicketData =
+      ticketJsonPayload?.ready === false ||
+      (ticketJsonPayload == null && aiProseSuggestsAwaitingUserTicketDetails(aiResponseForActions))
 
     const internalActionPattern = /\[INTERNAL_TICKET_ACTION:\s*(\w+)\s*\|(.+?)\]/g
     const githubActionPattern = /\[GITHUB_ACTION:\s*(\w+)\s*\|(.+?)\]/g
@@ -729,30 +914,24 @@ INSTRUCCIONES:
 
       try {
         if (actionType === 'create_ticket') {
-          if (jsonCreateSucceeded) {
-            continue
-          }
-          const r = await executeInternalTicketCreate(
-            teamId,
-            senderId || null,
-            teamProjectRefsForChat,
-            {
-              project: params.project,
-              title: params.title || '',
-              description: params.description || '',
-              priority: params.priority,
-              estimate: params.estimate,
-              assigneeEmail: params.assigneeEmail,
-              targetTeam: params.targetTeam,
-            },
-            { createdByType: 'ai', createdByName: 'Dayless.ai' }
-          )
-          if (r.ok) {
-            actionResults.push(
-              `✅ Ticket interno creado: ${r.ticketId} — "${r.title}" en ${r.projectName}${ticketUiVisibilityHint(r.projectName)}`
-            )
-          } else {
-            actionResults.push(r.message)
+          if (!pendingTicketConfirm) {
+            const title = (params.title || '').trim()
+            const description = (params.description || '').trim()
+            if (title.length >= 8 && description.length >= 30) {
+              pendingTicketConfirm = {
+                project: (params.project || '').trim() || chatProjectName,
+                title,
+                description,
+                priority: normalizeChatPriority(params.priority),
+                estimate: params.estimate?.trim() || undefined,
+                assigneeEmail: params.assigneeEmail?.trim() || undefined,
+                targetTeam: params.targetTeam?.trim() || undefined,
+              }
+            } else {
+              actionResults.push(
+                '⚠️ Borrador incompleto en INTERNAL_TICKET_ACTION (título ≥8, descripción ≥30); confirma en el chat cuando el asistente lo proponga.'
+              )
+            }
           }
         } else if (actionType === 'update_ticket') {
           const ticketId = params.ticketId
@@ -827,8 +1006,8 @@ INSTRUCCIONES:
     }
 
     const internalCreatedStart = actionResultsIndicateInternalTicketCreated(actionResults)
-    if (!internalCreatedStart && !skipServerTicketFallbacks) {
-      const appendLine = await tryAppendLatestReporterTicket(teamId, senderId || null, content)
+    if (!internalCreatedStart && !skipServerTicketFallbacks && !modelPendingMoreTicketData && !pendingTicketConfirm) {
+      const appendLine = await tryAppendLatestReporterTicket(teamId, projectId, senderId || null, content)
       if (appendLine) {
         actionResults.push(appendLine)
       } else {
@@ -836,92 +1015,14 @@ INSTRUCCIONES:
           teamId,
           senderId || null,
           teamProjectRefsForChat,
-          recentMessages as RecentMsg[]
+          recentMessages as RecentMsg[],
+          projectId
         )
         if (autoLine) actionResults.push(autoLine)
       }
     }
 
-    // Fallback: only if the user already gave enough detail in the same message (no "crea ticket" vacío).
-    const askedToCreateInternal =
-      /(?:crea|crear|creame|créame)\s+(?:una\s+)?(?:tarea|ticket)/i.test(content)
-    const internalDetailAfterCommand = content
-      .replace(/^(?:crea|crear|creame|créame)\s+(?:una\s+)?(?:tarea|ticket)\s*(?:interna)?\s*/i, '')
-      .trim()
-    const internalCreatedByTag = actionResultsIndicateInternalTicketCreated(actionResults)
-    if (
-      askedToCreateInternal &&
-      !internalCreatedByTag &&
-      !skipServerTicketFallbacks &&
-      internalDetailAfterCommand.length >= 30
-    ) {
-      try {
-        const selectedProject = await resolveProjectForMemberInternalTicket(
-          teamId,
-          senderId || null,
-          undefined,
-          teamProjectRefsForChat
-        )
-        if (selectedProject) {
-          const workflowRows = await db.$queryRawUnsafe(
-            'SELECT id FROM "TicketWorkflow" WHERE "projectId" = ? ORDER BY position ASC LIMIT 1',
-            selectedProject.id
-          ) as Array<{ id: string }>
-          const workflow = workflowRows[0]
-          if (workflow) {
-            const lastRows = await db.$queryRawUnsafe(
-              'SELECT "order" FROM "Ticket" WHERE "projectId" = ? AND "statusId" = ? ORDER BY "order" DESC LIMIT 1',
-              selectedProject.id,
-              workflow.id
-            ) as Array<{ order: number }>
-            const ticketId = 'tkt_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8)
-            const nowIso = new Date().toISOString()
-            const normalized = internalDetailAfterCommand
-            const title = normalized.length > 80 ? `${normalized.slice(0, 77)}...` : normalized.slice(0, 140)
-            const inferredQa = /(qa|test|testing|validaci[oó]n|regresi[oó]n)/i.test(content)
-            const qaRows = inferredQa
-              ? await db.$queryRawUnsafe(
-                  'SELECT id FROM "Team" WHERE lower(name) LIKE lower(?) LIMIT 1',
-                  '%qa%'
-                ) as Array<{ id: string }>
-              : []
-            const targetTeamId = qaRows[0]?.id || null
-            await db.$executeRawUnsafe(
-              'INSERT INTO "Ticket" (id, "teamId", "targetTeamId", "projectId", "statusId", title, description, priority, "order", "reporterMemberId", "createdByType", "createdByName", "createdAt", "updatedAt") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-              ticketId,
-              selectedProject.teamId,
-              targetTeamId,
-              selectedProject.id,
-              workflow.id,
-              title,
-              normalized,
-              'medium',
-              (lastRows[0]?.order || 0) + 1,
-              senderId || null,
-              'system',
-              'Chat (automático)',
-              nowIso,
-              nowIso
-            )
-            await db.$executeRawUnsafe(
-              'INSERT INTO "TicketTransition" (id, "ticketId", "toStatusId", reason, "actorType", "actorName", "createdAt") VALUES (?, ?, ?, ?, ?, ?, ?)',
-              'ttr_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
-              ticketId,
-              workflow.id,
-              'Creado por fallback desde chat',
-              'system',
-              'Fallback',
-              nowIso
-            )
-            actionResults.push(
-              `✅ Ticket interno creado automáticamente: ${ticketId} — "${title}" en ${selectedProject.name}${ticketUiVisibilityHint(selectedProject.name)}`
-            )
-          }
-        }
-      } catch (err) {
-        actionResults.push(`❌ No se pudo crear ticket interno automáticamente: ${err instanceof Error ? err.message : String(err)}`)
-      }
-    }
+    // Sin INSERT automático por "crea ticket" + texto largo: la creación va con confirmación en el cliente.
 
     while ((match = githubRegex.exec(aiResponseForActions)) !== null) {
       const actionType = match[1].trim()
@@ -1078,9 +1179,19 @@ INSTRUCCIONES:
     finalResponse = normalizeMessageBodyForHistory(finalResponse, 'Dayless.ai')
 
     // Save AI message
-    const aiMessage = await db.message.create({
-      data: { teamId, senderId: null, senderName: 'Dayless.ai', senderType: 'ai', content: finalResponse },
-    })
+    const aiMessage = await withPrisma((p) =>
+      p.message.create({
+        data: {
+          team: { connect: { id: teamId } },
+          owner: { connect: { id: ownerMemberId } },
+          project: { connect: { id: projectId } },
+          senderId: null,
+          senderName: 'Dayless.ai',
+          senderType: 'ai',
+          content: finalResponse,
+        },
+      })
+    )
 
     // Auto-extract knowledge if AI used 📌
     const knowledgePatterns = [
@@ -1105,7 +1216,11 @@ INSTRUCCIONES:
 
     return NextResponse.json({
       success: true,
-      data: { userMessage, aiMessage },
+      data: {
+        userMessage,
+        aiMessage,
+        ...(pendingTicketConfirm ? { pendingTicketConfirm } : {}),
+      },
     })
   } catch (error) {
     console.error('Chat API Error:', error)

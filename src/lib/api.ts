@@ -22,6 +22,7 @@ import type {
   CreateKnowledgeInput,
   UpdateKnowledgeInput,
   SubmitStandupInput,
+  PendingInternalTicketConfirm,
 } from "@/types";
 
 async function apiFetch<T>(
@@ -140,10 +141,14 @@ export const sendTicketMessage = (
     method: "POST",
     body: JSON.stringify(payload),
   });
-export const runTicketAiAction = (ticketId: string, action: string, context?: unknown) =>
+export const runTicketAiAction = (
+  ticketId: string,
+  action: string,
+  options?: { applyToTicket?: boolean }
+) =>
   apiFetch<any>(`tickets/${encodeURIComponent(ticketId)}/ai`, {
     method: "POST",
-    body: JSON.stringify({ action, context }),
+    body: JSON.stringify({ action, applyToTicket: options?.applyToTicket }),
   });
 export const getTicketExternalLinks = (ticketId: string) =>
   apiFetch<{ github: Array<{ repo: string; number: number; url?: string }>; jira: Array<{ key: string; url?: string }> }>(
@@ -156,8 +161,53 @@ export const updateTicketExternalLinks = (ticketId: string, externalRefs: unknow
   });
 
 // --- Messages ---
-export const getMessages = (teamId: string, limit = 50) => apiFetch<Message[] & { meta?: { total: number } }>(`messages?teamId=${encodeURIComponent(teamId)}&limit=${limit}`);
+export const getMessages = (teamId: string, ownerMemberId: string, projectId: string, limit = 50) =>
+  apiFetch<Message[] & { meta?: { total: number } }>(
+    `messages?teamId=${encodeURIComponent(teamId)}&ownerMemberId=${encodeURIComponent(ownerMemberId)}&projectId=${encodeURIComponent(projectId)}&limit=${limit}`
+  );
 export const deleteMessage = (id: string) => apiFetch<null>(`messages/${encodeURIComponent(id)}`, { method: "DELETE" });
+
+export const postChatThreadMessage = (payload: {
+  teamId: string;
+  ownerMemberId: string;
+  projectId: string;
+  senderId?: string | null;
+  senderName: string;
+  senderType?: "member" | "ai" | "system";
+  content: string;
+  metadata?: unknown;
+}) => apiFetch<Message>("messages", { method: "POST", body: JSON.stringify(payload) });
+
+export const broadcastProjectStandup = (projectId: string, initiatorMemberId: string) =>
+  apiFetch<{ notified: number; memberIds: string[] }>("project-standup/broadcast", {
+    method: "POST",
+    body: JSON.stringify({ projectId, initiatorMemberId }),
+  });
+
+export type ProjectStandupSummary = {
+  date: string;
+  projectName: string;
+  markdown: string;
+  members: Array<{
+    memberId: string;
+    name: string;
+    submitted: boolean;
+    checkin: StandupCheckin | null;
+  }>;
+};
+
+export const getProjectStandupSummary = (
+  projectId: string,
+  requesterMemberId: string,
+  date?: string
+) => {
+  const params = new URLSearchParams({
+    projectId,
+    requesterMemberId,
+  });
+  if (date) params.set("date", date);
+  return apiFetch<ProjectStandupSummary>(`project-standup/summary?${params.toString()}`);
+};
 
 // --- Knowledge ---
 export const getKnowledge = (teamId?: string, category?: string) => {
@@ -192,11 +242,47 @@ export const generateReport = (teamId: string, date: string) => apiFetch<DailyRe
 export interface ChatResponse {
   userMessage: Message;
   aiMessage: Message;
+  pendingTicketConfirm?: PendingInternalTicketConfirm;
 }
-export const sendChatMessage = (teamId: string, senderId: string | null, senderName: string, content: string) =>
+export const sendChatMessage = (
+  teamId: string,
+  ownerMemberId: string,
+  projectId: string,
+  senderId: string | null,
+  senderName: string,
+  content: string
+) =>
   apiFetch<ChatResponse>("chat", {
     method: "POST",
-    body: JSON.stringify({ teamId, senderId, senderName, senderType: 'member', content }),
+    body: JSON.stringify({
+      teamId,
+      ownerMemberId,
+      projectId,
+      senderId,
+      senderName,
+      senderType: "member",
+      content,
+    }),
+  });
+
+export const confirmChatTicket = (
+  teamId: string,
+  ownerMemberId: string,
+  projectId: string,
+  senderId: string | null,
+  senderName: string,
+  draft: PendingInternalTicketConfirm
+) =>
+  apiFetch<ChatResponse>("chat", {
+    method: "POST",
+    body: JSON.stringify({
+      teamId,
+      ownerMemberId,
+      projectId,
+      senderId,
+      senderName,
+      confirmInternalTicket: draft,
+    }),
   });
 
 // --- Seed ---
